@@ -1271,6 +1271,11 @@ def main():
     dr6_splus = pd.read_csv(DR6_LIST)
     print(f"Loaded {len(dr6_splus)} rows from {DR6_LIST}")
 
+    # remove rows where field starts with SPLUS-b or SPLUS-d or MC
+    mask_valid = ~dr6_splus["field"].str.startswith(("SPLUS-b", "SPLUS-d", "MC"))
+    dr6_splus = dr6_splus.loc[mask_valid].reset_index(drop=True)
+    print(f"Filtered to {len(dr6_splus)} valid S-PLUS fields for datacubes")
+    
     # Gaia indices
     gaia_index = build_range_index(GAIA_DIR, "GaiaSource_", ".csv.gz")
     print(f"Indexed {len(gaia_index)} Gaia source chunks")
@@ -1339,6 +1344,12 @@ def main():
 
     # Process ONE FIELD AT A TIME
     for _, row in dr6_splus.iterrows():
+        # check if output file already exists
+        out_name = os.path.join(OUTFOLDER, f"datacube_{row['field']}.parquet")
+        if os.path.exists(out_name):
+            print(f"\n=== Field {row['field']} already processed; skipping ===")
+            continue
+        
         build_datacube_for_field(row,
                                  gaia_index,
                                  gaia_spec_index,
