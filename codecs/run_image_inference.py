@@ -160,9 +160,14 @@ class SplusDataset(Dataset):
         # Build per-band images and basic validity masks from parquet row
         for band in BANDS:
             flat = self.df[f"splus_cut_{band}"][idx]
-            img = _to_image_torch(flat)  # (H,W)
 
-            valid = torch.isfinite(img) & (img != 0.0)
+            if flat is None:
+                img = torch.zeros((IMG_SIZE, IMG_SIZE), dtype=torch.float32)
+                valid = torch.zeros((IMG_SIZE, IMG_SIZE), dtype=torch.bool)
+            else:
+                img = _to_image_torch(flat)  # (H,W)
+                valid = torch.isfinite(img) & (img != 0.0)
+
             img_clean = img.clone()
             img_clean[~torch.isfinite(img_clean)] = 0.0
 
@@ -375,6 +380,14 @@ def run_inference():
 
     for path in files:
         print(f"\nProcessing file: {path}")
+        
+        out_name = path.stem + "_latents.npz"
+        out_path = Path(OUTPUT_DIR) / out_name
+        
+        if out_path.exists():
+            print(f"  -> Output file {out_path} already exists, skipping.")
+            continue
+        
         # Try to include an ID column if it exists in the schema
         df_full = pl.read_parquet(path, n_rows=1)
         id_col: Optional[str] = None
