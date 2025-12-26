@@ -1,5 +1,14 @@
 #!/usr/bin/env python
 import os
+
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("BLIS_NUM_THREADS", "1")
+os.environ.setdefault("GOTO_NUM_THREADS", "1")
+
 import random
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -21,7 +30,7 @@ LATENT_DIR = "output_latents"
 CODEBOOK_PATH = "codebook_kmeans_2048.joblib"
 
 # Where to save the tokens
-TOKENS_DIR = "tokens_for_transformer"
+TOKENS_DIR = "image_tokens"
 
 # Must match your autoencoder
 LATENT_DIM = 2
