@@ -22,6 +22,9 @@ import numpy as np
 import polars as pl
 from tqdm.auto import tqdm
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import traceback
+
 # =========================
 # CONFIG
 # =========================
@@ -51,6 +54,8 @@ GAIAXPY_WITH_CORRELATION = False
 
 # Cap per-row output for GaiaXP (recommended)
 MAX_POINTS_PER_ROW_GAIAXP = 512  # each flux bin becomes a token; cap keeps files smaller
+
+N_WORKERS = 12  # tune
 
 # =========================
 # HELPERS
@@ -597,6 +602,119 @@ def _tokenize_scalar_vector(values: np.ndarray, mean: np.ndarray, std: np.ndarra
 # TOKENIZATION (DESI/ZTF + GaiaXP)
 # =========================
 
+def _process_one_file(path: Path) -> Tuple[str, bool, str]:
+    """
+    Returns (filename, ok, message)
+    """
+    try:
+        out_path = Path(OUTPUT_DIR) / (path.stem + "_spectrum_tokens.npz")
+        if out_path.exists():
+            return (Path(path).name, True, f"already exists: {out_path.name}")
+
+        # (everything you currently do inside `for path in files:` goes here)
+        # IMPORTANT: load tokenizer config inside worker OR pass only the config path.
+        group_names, group_means, group_stds, group_codebooks, group_columns, codebook_size = load_tokenizer_config(TOKENIZER_CONFIG)
+
+        p = Path(path)
+
+        cols_in_file = read_schema_fast(path)
+        cols_set = set(cols_in_file)
+        id_col = choose_id_column(cols_in_file)
+
+        gaia_colmap = _resolve_gaiaxp_continuous_columns(cols_in_file)
+
+        available_group_specs: List[Dict[str, Any]] = []
+        for gname in group_names:
+            gname = _to_str(gname)
+            spec = group_columns.get(gname)
+            if not isinstance(spec, dict):
+                continue
+
+            kind = spec.get("kind")
+            spec = dict(spec)
+            spec["name"] = gname
+
+            if kind == "flux_ivar":
+                need = [spec["flux_col"], spec["ivar_col"]]
+                if all(c in cols_set for c in need):
+                    available_group_specs.append(spec)
+
+            elif kind == "value_only":
+                need = [spec["flux_col"]]
+                if all(c in cols_set for c in need):
+                    available_group_specs.append(spec)
+
+            elif kind == "ztf_mag_err":
+                need = [spec["mag_col"], spec["err_col"]]
+                if all(c in cols_set for c in need):
+                    available_group_specs.append(spec)
+
+            elif kind == "gaiaxpy_xp":
+                if gaia_colmap is None:
+                    continue
+                if "xp_band" not in spec:
+                    continue
+                spec["_gaia_colmap"] = gaia_colmap
+                available_group_specs.append(spec)
+
+        if not available_group_specs:
+            return (p.name, False, "no groups present")
+
+        cols_to_read: List[str] = []
+        if id_col is not None:
+            cols_to_read.append(id_col)
+
+        for spec in available_group_specs:
+            kind = spec["kind"]
+            if kind == "flux_ivar":
+                cols_to_read.extend([spec["flux_col"], spec["ivar_col"]])
+            elif kind == "value_only":
+                cols_to_read.append(spec["flux_col"])
+            elif kind == "ztf_mag_err":
+                cols_to_read.extend([spec["mag_col"], spec["err_col"]])
+            elif kind == "gaiaxpy_xp":
+                assert gaia_colmap is not None
+                cols_to_read.extend([gaia_colmap[k] for k in gaia_colmap.keys()])
+
+        cols_to_read = list(dict.fromkeys(cols_to_read))
+        df = pl.read_parquet(path, columns=cols_to_read)
+
+        n_rows = df.height
+
+        out_data: Dict[str, Any] = {}
+        if id_col is not None and id_col in df.columns:
+            out_data["ids"] = df[id_col].to_numpy()
+            out_data["id_col"] = np.array([id_col], dtype=object)
+        else:
+            out_data["ids"] = np.array([], dtype=np.int64)
+            out_data["id_col"] = np.array([""], dtype=object)
+            if SAVE_ROW_INDEX_IF_NO_ID:
+                out_data["row_index"] = np.arange(n_rows, dtype=np.int64)
+
+        for spec in available_group_specs:
+            name = spec["name"]
+            payload = compute_tokens_for_group_in_file(
+                df=df,
+                group_spec=spec,
+                mean=group_means[name],
+                std=group_stds[name],
+                centers=group_codebooks[name],
+            )
+            if "tokens" in payload:
+                out_data[f"tokens_{name}"] = payload["tokens"]
+            if "tokens_flat" in payload and "tokens_indptr" in payload:
+                out_data[f"tokens_{name}_flat"] = payload["tokens_flat"]
+                out_data[f"tokens_{name}_indptr"] = payload["tokens_indptr"]
+
+        ensure_dir(OUTPUT_DIR)
+        out_path = Path(OUTPUT_DIR) / (p.stem + "_spectrum_tokens.npz")
+        np.savez_compressed(out_path, **out_data)
+
+        return (p.name, True, f"saved {out_path.name}")
+
+    except Exception as e:
+        return (Path(path).name, False, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+
 def compute_tokens_for_group_in_file(
     df: pl.DataFrame,
     group_spec: Dict[str, Any],
@@ -873,152 +991,39 @@ def compute_tokens_for_group_in_file(
 # =========================
 
 def encode_spectrum_tokens():
-    files = list_parquet_files()
-    print(f"Found {len(files)} parquet files.")
-
-    group_names, group_means, group_stds, group_codebooks, group_columns, codebook_size = load_tokenizer_config(TOKENIZER_CONFIG)
-    print(f"\nLoaded spectrum tokenizer config for groups: {list(group_names)} (K={codebook_size})")
-
-    if not group_columns:
-        raise RuntimeError(
-            "Your tokenizer config does not contain 'group_columns'.\n"
-            "Use the training script version that saves group_columns, or hardcode groups here."
-        )
-
+    files_all = list_parquet_files()
     ensure_dir(OUTPUT_DIR)
 
-    for path in files:
-        p = Path(path)
-        print(f"\nProcessing file: {p.name}")
-
-        try:
-            cols_in_file = read_schema_fast(path)
-        except Exception as e:
-            print(f"  [warn] Could not read schema: {e}")
+    files = []
+    skipped = 0
+    for f in files_all:
+        out_path = Path(OUTPUT_DIR) / (f.stem + "_spectrum_tokens.npz")
+        if out_path.exists():
+            skipped += 1
             continue
+        files.append(f)
 
-        cols_set = set(cols_in_file)
-        id_col = choose_id_column(cols_in_file)
+    print(f"Found {len(files_all)} parquet files.")
+    print(f"Skipping {skipped} already-encoded outputs in {OUTPUT_DIR}.")
+    print(f"To process: {len(files)}")
+    print(f"Parallel workers: {N_WORKERS}")
 
-        # Pre-resolve GaiaXP colmap if possible (once per file)
-        gaia_colmap = _resolve_gaiaxp_continuous_columns(cols_in_file)
+    if not files:
+        print("Nothing to do.")
+        return
 
-        available_group_specs: List[Dict[str, Any]] = []
-        for gname in group_names:
-            gname = _to_str(gname)
-            spec = group_columns.get(gname)
-            if not isinstance(spec, dict):
-                continue
-
-            kind = spec.get("kind")
-            spec = dict(spec)
-            spec["name"] = gname
-
-            if kind == "flux_ivar":
-                need = [spec["flux_col"], spec["ivar_col"]]
-                if all(c in cols_set for c in need):
-                    available_group_specs.append(spec)
-
-            elif kind == "value_only":
-                need = [spec["flux_col"]]
-                if all(c in cols_set for c in need):
-                    available_group_specs.append(spec)
-
-            elif kind == "ztf_mag_err":
-                need = [spec["mag_col"], spec["err_col"]]
-                if all(c in cols_set for c in need):
-                    available_group_specs.append(spec)
-
-            elif kind == "gaiaxpy_xp":
-                # Needs GaiaXP coefficient columns (resolved via gaia_colmap)
-                if gaia_colmap is None:
-                    continue
-                spec["_gaia_colmap"] = gaia_colmap
-                # also requires xp_band in spec ("BP"/"RP")
-                if "xp_band" not in spec:
-                    continue
-                available_group_specs.append(spec)
-
+    ok = 0
+    with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+        futs = [ex.submit(_process_one_file, f) for f in files]
+        for fut in tqdm(as_completed(futs), total=len(futs), desc="files"):
+            fname, success, msg = fut.result()
+            if success:
+                ok += 1
             else:
-                continue
+                print(f"[warn] {fname}: {msg}")
 
-        if not available_group_specs:
-            print("  -> no spectrum groups present in this file (per tokenizer config), skipping.")
-            continue
+    print(f"Done. OK: {ok}/{len(files)}")
 
-        # columns to read
-        cols_to_read: List[str] = []
-        if id_col is not None:
-            cols_to_read.append(id_col)
-
-        for spec in available_group_specs:
-            kind = spec["kind"]
-            if kind == "flux_ivar":
-                cols_to_read.extend([spec["flux_col"], spec["ivar_col"]])
-            elif kind == "value_only":
-                cols_to_read.append(spec["flux_col"])
-            elif kind == "ztf_mag_err":
-                cols_to_read.extend([spec["mag_col"], spec["err_col"]])
-            elif kind == "gaiaxpy_xp":
-                assert gaia_colmap is not None
-                # read all columns GaiaXPy input builder might use
-                cols_to_read.extend([gaia_colmap[k] for k in gaia_colmap.keys()])
-
-        cols_to_read = list(dict.fromkeys(cols_to_read))
-
-        try:
-            df = pl.read_parquet(path, columns=cols_to_read)
-        except Exception as e:
-            print(f"  [warn] Could not read parquet columns: {e}")
-            continue
-
-        n_rows = df.height
-        print(f"  -> rows: {n_rows}")
-        print(f"  -> id_col: {id_col if id_col is not None else '(none)'}")
-        print(f"  -> groups used: {[g['name'] for g in available_group_specs]}")
-
-        out_data: Dict[str, Any] = {}
-
-        if id_col is not None and id_col in df.columns:
-            out_data["ids"] = df[id_col].to_numpy()
-            out_data["id_col"] = np.array([id_col], dtype=object)
-        else:
-            out_data["ids"] = np.array([], dtype=np.int64)
-            out_data["id_col"] = np.array([""], dtype=object)
-            if SAVE_ROW_INDEX_IF_NO_ID:
-                out_data["row_index"] = np.arange(n_rows, dtype=np.int64)
-
-        for spec in available_group_specs:
-            name = spec["name"]
-            mean = group_means[name]
-            std = group_stds[name]
-            centers = group_codebooks[name]
-
-            payload = compute_tokens_for_group_in_file(df, spec, mean, std, centers)
-
-            # rectangular groups
-            if "tokens" in payload:
-                out_data[f"tokens_{name}"] = payload["tokens"]
-
-            # GaiaXP ragged groups
-            if "tokens_flat" in payload and "tokens_indptr" in payload:
-                out_data[f"tokens_{name}_flat"] = payload["tokens_flat"]
-                out_data[f"tokens_{name}_indptr"] = payload["tokens_indptr"]
-
-        out_name = p.stem + "_spectrum_tokens.npz"
-        out_path = Path(OUTPUT_DIR) / out_name
-        np.savez_compressed(out_path, **out_data)
-
-        shapes = {}
-        for k, v in out_data.items():
-            if isinstance(v, np.ndarray) and k.startswith("tokens_"):
-                shapes[k] = v.shape
-        print(f"  -> saved {out_path} with token arrays: {shapes}")
-
-        # small hint about ragged decoding (only if GaiaXP groups exist)
-        ragged = [k for k in shapes.keys() if k.endswith("_indptr")]
-        if ragged:
-            print("  -> note: GaiaXP tokens are ragged: use *_flat + *_indptr to slice per row.")
 
 if __name__ == "__main__":
     encode_spectrum_tokens()
