@@ -1,46 +1,88 @@
 #!/usr/bin/env python3
-import math
+from __future__ import annotations
+
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import polars as pl
 
+
 # =========================
 # CONFIG
 # =========================
 
-# Folder where your hypercube parquet tables live
 INPUT_DIR = "/home/astrodados4/downloads/hypercube"
-
-# File pattern for hypercube tables
 FILE_PATTERN = "datacube_*.parquet"
 
-# Output config with bin edges
 OUTPUT_CONFIG = "scalar_tokenizer_config.npz"
 
-# How many bins per scalar (AION-style)
 N_BINS = 1024
 
-# To avoid storing billions of values in RAM, subsample per column
-MAX_VALUES_PER_COL = 2_000_000           # global cap across all files
-MAX_VALUES_PER_FILE_PER_COL = 100_000    # per-file cap
+MAX_VALUES_PER_COL = 2_000_000
+MAX_VALUES_PER_FILE_PER_COL = 100_000
+
+RNG_SEED = 0
+
+# --- row filter: keep only objects within this r-band range ---
+MAG_FILTER_COL = "mag_pstotal_r"
+MAG_MIN = 14.0
+MAG_MAX = 22.0
+APPLY_ROW_FILTER = True  # <--- set False if you ever want to disable this
+
+# --- value-level filter for S-PLUS magnitude errors ---
+APPLY_MAGERR_FILTER = True
+MAGERR_MAX = 2.0  # keep only 0 < err < 2 for err_mag_pstotal_*
+
 
 # -------------------------
 # YOU CHOOSE SCALAR COLUMNS
 # -------------------------
-# Put the scalar columns you want here. They may appear only in some files.
-# If empty, the script will auto-discover numeric scalar columns from the UNION schema of all files.
-SCALAR_COLUMNS: List[str] = [
-    # Examples:
-    # "ra", "dec", "r_med_photogeo",
-    # "mag_psf_u", "mag_psf_g", "mag_psf_r",
+
+splus_bands = [
+    "u", "i", "r", "g", "z",
+    "j0378", "j0395", "j0410", "j0430",
+    "j0515", "j0660", "j0861",
 ]
 
-# If True, boolean columns are allowed (they'll be tokenized as 0/1)
+SCALAR_COLUMNS: List[str] = [
+    "ellipticity_det",
+    "elongation_det",
+    "a_pixel_det",
+    "b_pixel_det",
+    "theta_det",
+    "fwhm_n_det",
+    *[f"mag_pstotal_{b}" for b in splus_bands],
+    *[f"err_mag_pstotal_{b}" for b in splus_bands],
+    "gaia_parallax",
+    "gaia_parallax_error",
+    "gaia_pmra",
+    "gaia_pmdec",
+    "gaia_pmra_error",
+    "gaia_pmdec_error",
+    "gaia_phot_bp_mean_flux",
+    "gaia_phot_rp_mean_flux",
+    "gaia_phot_g_mean_flux",
+    "gaia_phot_bp_mean_flux_error",
+    "gaia_phot_rp_mean_flux_error",
+    "gaia_phot_g_mean_flux_error",
+    "gaia_teff_gspphot",
+    "gaia_logg_gspphot",
+    "gaia_mh_gspphot",
+    "specz_z",
+    "specz_e_z",
+    "vista_yapermag6",
+    "vista_yapermag6err",
+    "vista_japermag6",
+    "vista_japermag6err",
+    "vista_hapermag6",
+    "vista_hapermag6err",
+    "vista_ksapermag6",
+    "vista_ksapermag6err",
+]
+
 ALLOW_BOOL = False
 
-# Exclusion rules (apply in BOTH manual and auto mode)
 EXCLUDE_PREFIXES = (
     "splus_cut_",
     "desi_wave_",
@@ -55,6 +97,9 @@ EXCLUDE_SUBSTRINGS = (
     "gaiaxp_rp_coefficients",
 )
 
+MIN_VALUES_TO_FIT = 1000
+EDGE_EPS = 1e-8
+
 
 # =========================
 # HELPERS
@@ -68,7 +113,7 @@ def list_parquet_files() -> List[Path]:
     return files
 
 
-def ensure_dir(path: str):
+def ensure_dir_for_file(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -82,37 +127,17 @@ def is_excluded(col: str) -> bool:
     return False
 
 
-def read_schema_fast(path: Path) -> Dict[str, pl.DataType]:
-    """
-    Read schema without loading data. n_rows=0 is typically cheap.
-    """
-    df0 = pl.read_parquet(path, n_rows=0)
-    return dict(zip(df0.columns, [df0[c].dtype for c in df0.columns]))
+def is_splus_mag(col: str) -> bool:
+    # apply value-level cut (14..22) only to these columns
+    return col.startswith("mag_pstotal_")
 
 
-def union_schemas(files: List[Path]) -> Dict[str, pl.DataType]:
-    """
-    Build a union schema: col -> dtype (first-seen dtype).
-    If same col appears with different dtypes across files, we keep first and warn.
-    """
-    union: Dict[str, pl.DataType] = {}
-    for f in files:
-        sch = read_schema_fast(f)
-        for c, dt in sch.items():
-            if c not in union:
-                union[c] = dt
-            else:
-                # dtype drift warning
-                if union[c] != dt:
-                    # keep first dtype; warn once per file occurrence
-                    print(f"[warn] dtype drift for '{c}': seen {union[c]} then {dt} in {f.name} (keeping {union[c]})")
-    return union
+def is_splus_magerr(col: str) -> bool:
+    return col.startswith("err_mag_pstotal_")
 
 
 def dtype_is_allowed_scalar(dt: pl.DataType) -> bool:
-    """
-    Decide if a dtype is a scalar numeric we want to tokenize.
-    """
+    # Polars dtype checks WITHOUT polars.datatypes.is_numeric
     if dt.is_numeric():
         return True
     if ALLOW_BOOL and dt == pl.Boolean:
@@ -120,170 +145,216 @@ def dtype_is_allowed_scalar(dt: pl.DataType) -> bool:
     return False
 
 
-def autodiscover_scalar_columns(schema: Dict[str, pl.DataType]) -> List[str]:
-    cols = []
-    for c, dt in schema.items():
-        if is_excluded(c):
+def read_schema_fast(path: Path) -> Dict[str, pl.DataType]:
+    df0 = pl.read_parquet(path, n_rows=0)
+    return {c: df0.schema[c] for c in df0.columns}
+
+
+def find_first_file_with_columns(files: List[Path], cols: List[str]) -> Optional[Path]:
+    need = set(cols)
+    for f in files:
+        try:
+            sch = read_schema_fast(f)
+        except Exception:
             continue
-        if dtype_is_allowed_scalar(dt):
-            cols.append(c)
-    return sorted(cols)
+        if need.issubset(set(sch.keys())):
+            return f
+    return None
 
 
-def filter_requested_columns(
-    requested: List[str],
-    schema: Dict[str, pl.DataType],
-) -> Tuple[List[str], List[str], List[str]]:
+def check_columns_exist_somewhere(files: List[Path], requested: List[str]) -> Tuple[List[str], List[str]]:
     """
-    Returns (selected_cols, missing_cols, excluded_cols)
-
-    - missing: not present in union schema
-    - excluded: present but excluded by name rules
-    - selected: present, not excluded, allowed dtype
+    Returns (present_somewhere, missing_everywhere) without building union schema.
     """
-    selected = []
-    missing = []
-    excluded = []
+    missing = set(requested)
+    present = set()
 
-    for c in requested:
-        if c not in schema:
-            missing.append(c)
+    for f in files:
+        if not missing:
+            break
+        try:
+            sch = read_schema_fast(f)
+        except Exception:
             continue
-        if is_excluded(c):
-            excluded.append(c)
-            continue
-        dt = schema[c]
-        if not dtype_is_allowed_scalar(dt):
-            excluded.append(f"{c} (dtype={dt})")
-            continue
-        selected.append(c)
+        have = set(sch.keys())
+        hit = missing.intersection(have)
+        if hit:
+            present.update(hit)
+            missing.difference_update(hit)
 
-    return selected, missing, excluded
+    present_list = [c for c in requested if c in present]
+    missing_list = [c for c in requested if c in missing]
+    return present_list, missing_list
 
 
-# =========================
-# MAIN TRAINING LOGIC
-# =========================
+def make_strictly_increasing_edges(edges: np.ndarray, eps: float = EDGE_EPS) -> np.ndarray:
+    edges = np.asarray(edges, dtype=np.float64)
+    for i in range(1, len(edges)):
+        if edges[i] <= edges[i - 1]:
+            edges[i] = edges[i - 1] + eps
+    return edges
 
-def collect_values_for_column(col: str, files: List[Path]) -> np.ndarray:
+
+def collect_values_for_column(
+    col: str,
+    files: List[Path],
+    rng: np.random.Generator,
+) -> np.ndarray:
     """
-    Stream over all files and collect numeric values for one column,
-    with subsampling to control memory.
-
-    Important: if the column doesn't exist in a file, it is skipped.
+    Collect values for ONE column across many files, with:
+      - optional row filtering by MAG_FILTER_COL in (MAG_MIN, MAG_MAX)
+      - per-file subsampling
+      - global cap
+      - extra value-level cut for S-PLUS magnitude columns (mag_pstotal_*)
+      - extra value-level cut for S-PLUS magnitude error columns (err_mag_pstotal_*): 0 < err < MAGERR_MAX
     """
-    all_vals = []
-    total_collected = 0
+    chunks: List[np.ndarray] = []
+    total = 0
 
     for path in files:
-        if total_collected >= MAX_VALUES_PER_COL:
+        if total >= MAX_VALUES_PER_COL:
             break
 
-        # Read only if column exists in that file (cheap schema check)
+        # read column plus filter column (so filter applies at the row-level)
+        cols_to_read = [col]
+        if APPLY_ROW_FILTER and MAG_FILTER_COL not in cols_to_read:
+            cols_to_read.append(MAG_FILTER_COL)
+
         try:
-            sch = read_schema_fast(path)
-        except Exception as e:
-            print(f"  [warn] Could not read schema from {path}: {e}")
+            df = pl.read_parquet(path, columns=cols_to_read)
+        except Exception:
             continue
 
-        if col not in sch:
-            continue
+        # apply row filter (mag_pstotal_r)
+        if APPLY_ROW_FILTER:
+            if MAG_FILTER_COL not in df.columns:
+                continue
 
-        # Now read column data
-        try:
-            df = pl.read_parquet(path, columns=[col])
-        except Exception as e:
-            print(f"  [warn] Could not read column '{col}' from {path}: {e}")
+            # keep only finite r and within range
+            df = df.filter(
+                pl.col(MAG_FILTER_COL).is_finite()
+                & (pl.col(MAG_FILTER_COL) > MAG_MIN)
+                & (pl.col(MAG_FILTER_COL) < MAG_MAX)
+            )
+            if df.height == 0:
+                continue
+
+        if col not in df.columns:
             continue
 
         s = df[col]
+        dt = s.dtype
 
-        # bool handling (optional)
-        if s.dtype == pl.Boolean:
-            arr = s.cast(pl.UInt8).to_numpy().astype(np.float64)
-        elif s.dtype.is_float():
-            arr = s.to_numpy()
-            arr = arr[np.isfinite(arr)]
-        elif s.dtype.is_integer():
-            arr = s.to_numpy().astype(np.float64)
-        else:
-            # Shouldn't happen if dtype filtering was done, but safe-guard
+        # dtype gate (some columns may drift)
+        if not dtype_is_allowed_scalar(dt):
+            continue
+
+        # Convert to numpy float64 + finite filtering for floats
+        try:
+            if dt == pl.Boolean:
+                arr = s.cast(pl.UInt8).to_numpy().astype(np.float64, copy=False)
+            elif dt.is_float():
+                arr = s.to_numpy()
+                arr = arr[np.isfinite(arr)]
+                arr = arr.astype(np.float64, copy=False)
+            elif dt.is_integer():
+                arr = s.to_numpy().astype(np.float64, copy=False)
+            else:
+                continue
+        except Exception:
             continue
 
         if arr.size == 0:
             continue
 
-        # subsample from this file
+        # extra value-level cut for S-PLUS mags (keeps bins sane)
+        if is_splus_mag(col):
+            arr = arr[(arr > MAG_MIN) & (arr < MAG_MAX)]
+            if arr.size == 0:
+                continue
+
+        # extra value-level cut for S-PLUS mag errors (fix giant outliers)
+        if APPLY_MAGERR_FILTER and is_splus_magerr(col):
+            arr = arr[(arr > 0.0) & (arr < MAGERR_MAX)]
+            if arr.size == 0:
+                continue
+
+        # subsample per file
         if arr.size > MAX_VALUES_PER_FILE_PER_COL:
-            idx = np.random.choice(arr.size, size=MAX_VALUES_PER_FILE_PER_COL, replace=False)
+            idx = rng.choice(arr.size, size=MAX_VALUES_PER_FILE_PER_COL, replace=False)
             arr = arr[idx]
 
-        all_vals.append(arr)
-        total_collected += arr.size
+        # respect global cap
+        remaining = int(MAX_VALUES_PER_COL - total)
+        if remaining <= 0:
+            break
+        if arr.size > remaining:
+            idx = rng.choice(arr.size, size=remaining, replace=False)
+            arr = arr[idx]
 
-    if not all_vals:
+        chunks.append(arr)
+        total += arr.size
+
+    if not chunks:
         return np.array([], dtype=np.float64)
 
-    return np.concatenate(all_vals, axis=0)
+    return np.concatenate(chunks, axis=0)
 
+
+# =========================
+# MAIN
+# =========================
 
 def fit_scalar_tokenizer():
+    rng = np.random.default_rng(RNG_SEED)
+
     files = list_parquet_files()
-    print("Found parquet files:")
-    for f in files:
-        print("  -", f)
+    print(f"Found {len(files)} parquet files in {INPUT_DIR} matching {FILE_PATTERN}")
 
-    print("\nBuilding UNION schema (so we can select columns that are not in the first file)...")
-    schema = union_schemas(files)
-    print(f"  -> union schema columns: {len(schema)}")
+    # quick sanity: ensure row filter column exists somewhere (if enabled)
+    if APPLY_ROW_FILTER:
+        probe = find_first_file_with_columns(files, [MAG_FILTER_COL])
+        if probe is None:
+            raise RuntimeError(
+                f"Row filter enabled, but '{MAG_FILTER_COL}' was not found in any file.\n"
+                "Set APPLY_ROW_FILTER=False or change MAG_FILTER_COL."
+            )
+        print(f"Row filter enabled: {MAG_MIN} < {MAG_FILTER_COL} < {MAG_MAX}")
 
-    # Decide which scalar columns to tokenize
-    if SCALAR_COLUMNS:
-        print("\nUsing user-provided SCALAR_COLUMNS list...")
-        selected_cols, missing_cols, excluded_cols = filter_requested_columns(SCALAR_COLUMNS, schema)
+    if APPLY_MAGERR_FILTER:
+        print(f"Mag-error filter enabled: 0 < err_mag_pstotal_* < {MAGERR_MAX}")
 
-        print("\nRequested scalar columns:")
-        for c in SCALAR_COLUMNS:
+    # filter/exclude requested columns
+    requested = [c for c in SCALAR_COLUMNS if (not is_excluded(c))]
+    present, missing = check_columns_exist_somewhere(files, requested)
+
+    if missing:
+        print("\n[warn] Requested but not found in ANY file:")
+        for c in missing:
             print("  -", c)
 
-        if selected_cols:
-            print("\nSelected for tokenization:")
-            for c in selected_cols:
-                print("  -", c)
-
-        if missing_cols:
-            print("\n[warn] Requested but not found in ANY file (union schema):")
-            for c in missing_cols:
-                print("  -", c)
-
-        if excluded_cols:
-            print("\n[warn] Requested but excluded (name rule or dtype):")
-            for c in excluded_cols:
-                print("  -", c)
-
-        scalar_cols = selected_cols
-    else:
-        print("\nSCALAR_COLUMNS is empty -> auto-discover numeric scalar columns from union schema...")
-        scalar_cols = autodiscover_scalar_columns(schema)
-        print(f"\nAuto-discovered scalar columns: {len(scalar_cols)}")
-        for c in scalar_cols:
-            print("  -", c)
+    scalar_cols = present
+    print(f"\nSelected for tokenization (exists somewhere & not excluded): {len(scalar_cols)}")
 
     if not scalar_cols:
-        raise RuntimeError("No scalar columns selected for tokenization. Check SCALAR_COLUMNS and exclusions.")
+        raise RuntimeError("No scalar columns selected for tokenization after existence check.")
+
+    # Precompute quantile positions once
+    quantiles = np.linspace(0.0, 1.0, N_BINS + 1)
 
     bin_edges: Dict[str, np.ndarray] = {}
     col_means: Dict[str, float] = {}
     col_stds: Dict[str, float] = {}
+    col_dtypes: Dict[str, str] = {}
 
     for col in scalar_cols:
         print(f"\nFitting tokenizer for column: {col}")
-        vals = collect_values_for_column(col, files)
-        n = vals.size
-        print(f"  -> collected {n} values (after subsampling/caps)")
+        vals = collect_values_for_column(col, files, rng=rng)
+        n = int(vals.size)
+        print(f"  -> collected {n} values (after caps/subsampling/filter)")
 
-        if n < 1000:
-            print("  -> too few values; skipping this column.")
+        if n < MIN_VALUES_TO_FIT:
+            print(f"  -> too few values (<{MIN_VALUES_TO_FIT}); skipping this column.")
             continue
 
         vals_sorted = np.sort(vals)
@@ -293,31 +364,52 @@ def fit_scalar_tokenizer():
         col_means[col] = mean
         col_stds[col] = std
 
-        # equal-mass binning (quantile bins)
-        quantiles = np.linspace(0.0, 1.0, N_BINS + 1)
         edges = np.quantile(vals_sorted, quantiles)
+        edges = make_strictly_increasing_edges(edges, eps=EDGE_EPS)
 
-        # ensure strictly increasing (avoid duplicate quantiles)
-        for i in range(1, len(edges)):
-            if edges[i] <= edges[i - 1]:
-                edges[i] = edges[i - 1] + 1e-8
+        bin_edges[col] = edges.astype(np.float64, copy=False)
 
-        bin_edges[col] = edges
+        # record dtype from the *first file where it exists*
+        dt_str = "unknown"
+        for f in files:
+            try:
+                sch = read_schema_fast(f)
+            except Exception:
+                continue
+            if col in sch:
+                dt_str = str(sch[col])
+                break
+        col_dtypes[col] = dt_str
+
         print(f"  -> bin edges: {edges.shape}, min={edges[0]:.6g}, max={edges[-1]:.6g}")
 
     if not bin_edges:
         raise RuntimeError("No columns produced bin edges (all had too few values?).")
 
-    ensure_dir(OUTPUT_CONFIG)
+    ensure_dir_for_file(OUTPUT_CONFIG)
     np.savez_compressed(
         OUTPUT_CONFIG,
         bin_edges=bin_edges,
         col_means=col_means,
         col_stds=col_stds,
+        col_dtypes=col_dtypes,
         N_BINS=int(N_BINS),
         input_dir=str(INPUT_DIR),
         file_pattern=str(FILE_PATTERN),
+        rng_seed=int(RNG_SEED),
+        max_values_per_col=int(MAX_VALUES_PER_COL),
+        max_values_per_file_per_col=int(MAX_VALUES_PER_FILE_PER_COL),
+        allow_bool=bool(ALLOW_BOOL),
+        min_values_to_fit=int(MIN_VALUES_TO_FIT),
+        edge_eps=float(EDGE_EPS),
+        apply_row_filter=bool(APPLY_ROW_FILTER),
+        mag_filter_col=str(MAG_FILTER_COL),
+        mag_min=float(MAG_MIN),
+        mag_max=float(MAG_MAX),
+        apply_magerr_filter=bool(APPLY_MAGERR_FILTER),
+        magerr_max=float(MAGERR_MAX),
     )
+
     print(f"\nSaved scalar tokenizer config to {OUTPUT_CONFIG}")
     print(f"Columns saved: {len(bin_edges)}")
 

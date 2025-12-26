@@ -1,0 +1,1573 @@
+{
+  "config": {
+    "INPUT_DIR": "/home/astrodados4/downloads/hypercube",
+    "FILE_PATTERN": "datacube_*.parquet",
+    "TOKENIZER_CONFIG": "scalar_tokenizer_config.npz",
+    "MAX_FILES": 50,
+    "MAX_ROWS_PER_FILE": 200000,
+    "MAX_VALUES_PER_COL": 1000000,
+    "N_BINS": 1024,
+    "RNG_SEED": 0
+  },
+  "columns": {
+    "a_pixel_det": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 0
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.557161018297219,
+        "perplexity": 704.2694456960254,
+        "perplexity_frac": 0.6877631305625248,
+        "top10_mass": 0.125219
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.050408593605022735,
+        "rmse": 1.658755129018977,
+        "p95_abs_err": 0.0051335287032997995,
+        "val_min": 0.494453489780426,
+        "val_med": 1.249399483203888,
+        "val_max": 217.23367309570312
+      }
+    },
+    "b_pixel_det": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 0
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.387122330417584,
+        "perplexity": 594.1443661072032,
+        "perplexity_frac": 0.5802191075265656,
+        "top10_mass": 0.127176
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.012178807220651913,
+        "rmse": 0.35180180227165336,
+        "p95_abs_err": 0.007062748620228364,
+        "val_min": 0.05137544870376587,
+        "val_med": 0.8817499577999115,
+        "val_max": 64.65123748779297
+      }
+    },
+    "ellipticity_det": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 0
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.7631719050233325,
+        "perplexity": 865.3827590087918,
+        "perplexity_frac": 0.8451003505945233,
+        "top10_mass": 0.049452
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.0006076433307032858,
+        "rmse": 0.0039438078697826865,
+        "p95_abs_err": 0.001740338193485511,
+        "val_min": 2.9742717742919922e-05,
+        "val_med": 0.2299608588218689,
+        "val_max": 0.9974201321601868
+      }
+    },
+    "elongation_det": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 0
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.763136369275731,
+        "perplexity": 865.3520075318806,
+        "perplexity_frac": 0.8450703198553522,
+        "top10_mass": 0.049456
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.2563427681356751,
+        "rmse": 4.66151514114083,
+        "p95_abs_err": 0.011077591468347235,
+        "val_min": 1.0000296831130981,
+        "val_med": 1.2987229824066162,
+        "val_max": 387.6171569824219
+      }
+    },
+    "err_mag_pstotal_g": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 16,
+        "files_missing_col": 0,
+        "rows_seen": 1093474,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 73170
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.472380150412814,
+        "perplexity": 647.0219051458153,
+        "perplexity_frac": 0.6318573292439602,
+        "top10_mass": 0.101895
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 52.68018651186204,
+        "rmse": 11465.786978784818,
+        "p95_abs_err": 0.8348029874730851,
+        "val_min": 0.00046187927364371717,
+        "val_med": 0.4426862746477127,
+        "val_max": 4998694.5
+      }
+    },
+    "err_mag_pstotal_i": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 16,
+        "files_missing_col": 0,
+        "rows_seen": 1093474,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 29882
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.439609883293446,
+        "perplexity": 626.1624757143384,
+        "perplexity_frac": 0.6114867926897836,
+        "top10_mass": 0.10974699999999998
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 5.802677142318741,
+        "rmse": 2623.9047802820205,
+        "p95_abs_err": 0.04107665074407109,
+        "val_min": 0.00043924886267632246,
+        "val_med": 0.20094648748636246,
+        "val_max": 2014544.125
+      }
+    },
+    "err_mag_pstotal_j0378": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 522344
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 5.7150354639812555,
+        "perplexity": 303.3949627118913,
+        "perplexity_frac": 0.29628414327333136,
+        "top10_mass": 0.263743
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 3593.073792342642,
+        "rmse": 777898.9561887498,
+        "p95_abs_err": 8.485617511568112,
+        "val_min": 0.0,
+        "val_med": 0.939327597618103,
+        "val_max": 551533696.0
+      }
+    },
+    "err_mag_pstotal_j0395": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 534478
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 5.590542092518442,
+        "perplexity": 267.88079653609384,
+        "perplexity_frac": 0.26160234036727914,
+        "top10_mass": 0.2853
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 4770.1538578234995,
+        "rmse": 2184214.5892029824,
+        "p95_abs_err": 9.37714072952511,
+        "val_min": 0.0,
+        "val_med": 1.0186734199523926,
+        "val_max": 2162890240.0
+      }
+    },
+    "err_mag_pstotal_j0410": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 490165
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 5.702995261161531,
+        "perplexity": 299.7639288829747,
+        "perplexity_frac": 0.29273821179978,
+        "top10_mass": 0.265252
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 8785.690243804864,
+        "rmse": 5220723.701342363,
+        "p95_abs_err": 8.524880828405724,
+        "val_min": 0.0,
+        "val_med": 0.9326026737689972,
+        "val_max": 5181512192.0
+      }
+    },
+    "err_mag_pstotal_j0430": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 21,
+        "files_missing_col": 0,
+        "rows_seen": 1449900,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 438045
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 5.778638197606741,
+        "perplexity": 323.3185944473067,
+        "perplexity_frac": 0.31574081488994793,
+        "top10_mass": 0.252163
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 4385.098680243915,
+        "rmse": 1497384.4829961087,
+        "p95_abs_err": 7.809631348261581,
+        "val_min": 0.0,
+        "val_med": 0.8808153569698334,
+        "val_max": 1328548096.0
+      }
+    },
+    "err_mag_pstotal_j0515": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 19,
+        "files_missing_col": 0,
+        "rows_seen": 1283777,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 281425
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.108800507187135,
+        "perplexity": 449.7988609557739,
+        "perplexity_frac": 0.4392567001521229,
+        "top10_mass": 0.191662
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 3093.753336868335,
+        "rmse": 434295.5825784712,
+        "p95_abs_err": 4.86153973401524,
+        "val_min": 0.0,
+        "val_med": 0.6470713913440704,
+        "val_max": 273790112.0
+      }
+    },
+    "err_mag_pstotal_j0660": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 17,
+        "files_missing_col": 0,
+        "rows_seen": 1157268,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 112081
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.391605638692322,
+        "perplexity": 596.8140785603484,
+        "perplexity_frac": 0.5828262485940903,
+        "top10_mass": 0.126645
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 3014.1654159503914,
+        "rmse": 287586.083398637,
+        "p95_abs_err": 0.5734853701433126,
+        "val_min": 0.00045968175982125103,
+        "val_med": 0.24447989463806152,
+        "val_max": 102587024.0
+      }
+    },
+    "err_mag_pstotal_j0861": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 17,
+        "files_missing_col": 0,
+        "rows_seen": 1157268,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 138960
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.424101422999392,
+        "perplexity": 616.5265719661403,
+        "perplexity_frac": 0.6020767304356839,
+        "top10_mass": 0.12221499999999999
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 7736.842911324594,
+        "rmse": 1436713.879421109,
+        "p95_abs_err": 1.2844817775417967,
+        "val_min": 0.0005415874184109271,
+        "val_med": 0.30840785801410675,
+        "val_max": 1031334592.0
+      }
+    },
+    "err_mag_pstotal_r": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 22619
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 5.6622976014732505,
+        "perplexity": 287.80915420593436,
+        "perplexity_frac": 0.2810636271542328,
+        "top10_mass": 0.298483
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 2.824646811519879,
+        "rmse": 1178.2796138172266,
+        "p95_abs_err": 0.706439666962251,
+        "val_min": 0.00044749880908057094,
+        "val_med": 0.2532629370689392,
+        "val_max": 1049821.75
+      }
+    },
+    "err_mag_pstotal_u": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 477797
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 5.783036750447632,
+        "perplexity": 324.74386062580874,
+        "perplexity_frac": 0.31713267639239134,
+        "top10_mass": 0.251107
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 3405.9588711910924,
+        "rmse": 573019.8222825833,
+        "p95_abs_err": 7.955276410211807,
+        "val_min": 0.0,
+        "val_med": 0.8894802033901215,
+        "val_max": 393279520.0
+      }
+    },
+    "err_mag_pstotal_z": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 16,
+        "files_missing_col": 0,
+        "rows_seen": 1093474,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 54776
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.496197384260917,
+        "perplexity": 662.6171578483525,
+        "perplexity_frac": 0.6470870682112817,
+        "top10_mass": 0.09719899999999998
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 5.548022448907495,
+        "rmse": 2269.686520443446,
+        "p95_abs_err": 0.05056172100885303,
+        "val_min": 0.0004463813966140151,
+        "val_med": 0.26090773940086365,
+        "val_max": 1953039.25
+      }
+    },
+    "fwhm_n_det": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 0
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 983,
+        "used_bins_frac": 0.9599609375,
+        "entropy_nats": 5.485847949859009,
+        "perplexity": 241.25342809998514,
+        "perplexity_frac": 0.23559905087889174,
+        "top10_mass": 0.314178
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.08555031678782642,
+        "rmse": 1.6199996310668732,
+        "p95_abs_err": 0.009284956866758868,
+        "val_min": -45.610164642333984,
+        "val_med": 1.0890961289405823,
+        "val_max": 194.14068603515625
+      }
+    },
+    "gaia_logg_gspphot": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 394382,
+        "nan_inf_dropped": 3297201
+      },
+      "dist": {
+        "n": 394382,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.915796245085813,
+        "perplexity": 1008.0733814970594,
+        "perplexity_frac": 0.984446661618222,
+        "top10_mass": 0.014955043587181971
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.0024358063446912894,
+        "rmse": 0.039046741966978424,
+        "p95_abs_err": 0.002349999999999852,
+        "val_min": 0.0804,
+        "val_med": 4.6436,
+        "val_max": 5.273
+      }
+    },
+    "gaia_mh_gspphot": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 394382,
+        "nan_inf_dropped": 3297201
+      },
+      "dist": {
+        "n": 394382,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.918312343386187,
+        "perplexity": 1010.6129868274235,
+        "perplexity_frac": 0.9869267449486557,
+        "top10_mass": 0.012718633203340924
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.001237171762709998,
+        "rmse": 0.005871694844400619,
+        "p95_abs_err": 0.0025500000000000245,
+        "val_min": -4.1451,
+        "val_med": -0.6839,
+        "val_max": 0.7967
+      }
+    },
+    "gaia_parallax": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 852668,
+        "nan_inf_dropped": 2838915
+      },
+      "dist": {
+        "n": 852668,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.926857698113638,
+        "perplexity": 1019.2860376623275,
+        "perplexity_frac": 0.9953965211546167,
+        "top10_mass": 0.012388174529828726
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.02539038865177191,
+        "rmse": 0.5057163493106254,
+        "p95_abs_err": 0.008549262642116393,
+        "val_min": -17.568072417745135,
+        "val_med": 0.528939543597063,
+        "val_max": 33.771165668164194
+      }
+    },
+    "gaia_parallax_error": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 852668,
+        "nan_inf_dropped": 2838915
+      },
+      "dist": {
+        "n": 852668,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.90540406903917,
+        "perplexity": 997.6515519860816,
+        "perplexity_frac": 0.9742690937364078,
+        "top10_mass": 0.027080880248819002
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.0012216235796485265,
+        "rmse": 0.022183428189743736,
+        "p95_abs_err": 0.002222839881591764,
+        "val_min": 0.010575605,
+        "val_med": 0.26514829500000003,
+        "val_max": 4.429264
+      }
+    },
+    "gaia_phot_bp_mean_flux": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 982110,
+        "nan_inf_dropped": 2709473
+      },
+      "dist": {
+        "n": 982110,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.8849982237944465,
+        "perplexity": 977.4999334663921,
+        "perplexity_frac": 0.9545897787757736,
+        "top10_mass": 0.03146592540550447
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 1816.6831316788737,
+        "rmse": 19588.984861888104,
+        "p95_abs_err": 48.978680328475306,
+        "val_min": 1.3759821844944253,
+        "val_med": 123.91473238980336,
+        "val_max": 12292003.82325868
+      }
+    },
+    "gaia_phot_bp_mean_flux_error": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 982110,
+        "nan_inf_dropped": 2709473
+      },
+      "dist": {
+        "n": 982110,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.887464733999419,
+        "perplexity": 979.9139228685679,
+        "perplexity_frac": 0.9569471903013358,
+        "top10_mass": 0.024978872020445773
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 17.732154073301036,
+        "rmse": 321.7725712104115,
+        "p95_abs_err": 0.0666783891845698,
+        "val_min": 0.00041670437,
+        "val_med": 8.729169,
+        "val_max": 48669.76
+      }
+    },
+    "gaia_phot_g_mean_flux": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 985163,
+        "nan_inf_dropped": 2706420
+      },
+      "dist": {
+        "n": 985163,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.883170275905458,
+        "perplexity": 975.7147466378577,
+        "perplexity_frac": 0.9528464322635329,
+        "top10_mass": 0.03190741024581719
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 4058.794068886324,
+        "rmse": 44563.96300157423,
+        "p95_abs_err": 94.2306870638538,
+        "val_min": 20.72004428152319,
+        "val_med": 324.17419905903046,
+        "val_max": 31331818.81972079
+      }
+    },
+    "gaia_phot_g_mean_flux_error": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 985163,
+        "nan_inf_dropped": 2706420
+      },
+      "dist": {
+        "n": 985163,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.873523110465552,
+        "perplexity": 966.3471232132606,
+        "perplexity_frac": 0.9436983625129498,
+        "top10_mass": 0.031324765546412114
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 6.248422570161587,
+        "rmse": 85.96240394693895,
+        "p95_abs_err": 0.024780872553711072,
+        "val_min": 0.39678243,
+        "val_med": 1.1206532,
+        "val_max": 9283.415
+      }
+    },
+    "gaia_phot_rp_mean_flux": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 984334,
+        "nan_inf_dropped": 2707249
+      },
+      "dist": {
+        "n": 984334,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.884413265155809,
+        "perplexity": 976.9283036422448,
+        "perplexity_frac": 0.9540315465256297,
+        "top10_mass": 0.03135724256197592
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 3661.2991395009867,
+        "rmse": 38604.68885850144,
+        "p95_abs_err": 67.18011870250093,
+        "val_min": 2.092503020157119,
+        "val_med": 317.34581500853363,
+        "val_max": 27165101.888789024
+      }
+    },
+    "gaia_phot_rp_mean_flux_error": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 984334,
+        "nan_inf_dropped": 2707249
+      },
+      "dist": {
+        "n": 984334,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.866933214331059,
+        "perplexity": 959.9999326744124,
+        "perplexity_frac": 0.9374999342523559,
+        "top10_mass": 0.024996596683645997
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 23.493869675528426,
+        "rmse": 405.2496680723484,
+        "p95_abs_err": 0.061148328442380696,
+        "val_min": 0.00042585252,
+        "val_med": 9.188313749999999,
+        "val_max": 44683.625
+      }
+    },
+    "gaia_pmdec": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 852668,
+        "nan_inf_dropped": 2838915
+      },
+      "dist": {
+        "n": 852668,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.918046390409194,
+        "perplexity": 1010.3442470326472,
+        "perplexity_frac": 0.9866643037428195,
+        "top10_mass": 0.01424821853288736
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.07850130333229853,
+        "rmse": 1.1788355475315655,
+        "p95_abs_err": 0.06822849452072313,
+        "val_min": -108.956363392136,
+        "val_med": 0.32162119641818715,
+        "val_max": 74.29451216410186
+      }
+    },
+    "gaia_pmdec_error": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 852668,
+        "nan_inf_dropped": 2838915
+      },
+      "dist": {
+        "n": 852668,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.9154605955476,
+        "perplexity": 1007.7350789108044,
+        "perplexity_frac": 0.9841162879988324,
+        "top10_mass": 0.02365398959501236
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.0009035486167829946,
+        "rmse": 0.005630477847642939,
+        "p95_abs_err": 0.0030584914794921144,
+        "val_min": 0.009432156,
+        "val_med": 0.26478413,
+        "val_max": 3.3468552
+      }
+    },
+    "gaia_pmra": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 852668,
+        "nan_inf_dropped": 2838915
+      },
+      "dist": {
+        "n": 852668,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.925099609950639,
+        "perplexity": 1017.4956172644208,
+        "perplexity_frac": 0.993648063734786,
+        "top10_mass": 0.013305295847856375
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.2076093835134075,
+        "rmse": 4.37331958108644,
+        "p95_abs_err": 0.08243408722178198,
+        "val_min": -303.6594095686973,
+        "val_med": -5.448408346928735,
+        "val_max": 80.10129850813352
+      }
+    },
+    "gaia_pmra_error": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 852668,
+        "nan_inf_dropped": 2838915
+      },
+      "dist": {
+        "n": 852668,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.920414743851939,
+        "perplexity": 1012.7399351067095,
+        "perplexity_frac": 0.989003842877646,
+        "top10_mass": 0.019297076939676402
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.001086166911839107,
+        "rmse": 0.00938224258210851,
+        "p95_abs_err": 0.0026958993737792526,
+        "val_min": 0.007187191,
+        "val_med": 0.26205933,
+        "val_max": 3.2762513
+      }
+    },
+    "gaia_teff_gspphot": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 394382,
+        "nan_inf_dropped": 3297201
+      },
+      "dist": {
+        "n": 394382,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.8981871296719,
+        "perplexity": 990.4774797857441,
+        "perplexity_frac": 0.9672631638532657,
+        "top10_mass": 0.02055621199750496
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 9.11003496055047,
+        "rmse": 237.06052016398525,
+        "p95_abs_err": 2.9854829272457435,
+        "val_min": 2628.6675,
+        "val_med": 4958.77325,
+        "val_max": 23703.95
+      }
+    },
+    "mag_pstotal_g": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 16,
+        "files_missing_col": 0,
+        "rows_seen": 1093474,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 73170
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 2.9569449735672935,
+        "perplexity": 19.23910590583925,
+        "perplexity_frac": 0.018788189361171142,
+        "top10_mass": 0.6732699999999999
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.7748355469043102,
+        "rmse": 1.2141658556752597,
+        "p95_abs_err": 2.5411161861445715,
+        "val_min": 11.267470916748046,
+        "val_med": 22.51684009361267,
+        "val_max": 36.50264116668701
+      }
+    },
+    "mag_pstotal_i": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 16,
+        "files_missing_col": 0,
+        "rows_seen": 1093474,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 29882
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 5.506528007014491,
+        "perplexity": 246.29450803624445,
+        "perplexity_frac": 0.24052198050414497,
+        "top10_mass": 0.306988
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.22874455420172599,
+        "rmse": 0.6213745948524153,
+        "p95_abs_err": 1.3623505929573423,
+        "val_min": 11.15190658569336,
+        "val_med": 21.24595497894287,
+        "val_max": 34.84792122650147
+      }
+    },
+    "mag_pstotal_j0378": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 522344
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 2.776925683218103,
+        "perplexity": 16.069542067266493,
+        "perplexity_frac": 0.015692912175064935,
+        "top10_mass": 0.695942
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.9017317182679374,
+        "rmse": 1.455573248330851,
+        "p95_abs_err": 3.1340415726001383,
+        "val_min": 10.327240066528319,
+        "val_med": 22.52884264945984,
+        "val_max": 37.49516102600097
+      }
+    },
+    "mag_pstotal_j0395": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 534478
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 3.7555477178115266,
+        "perplexity": 42.757632515096674,
+        "perplexity_frac": 0.041755500503024096,
+        "top10_mass": 0.564383
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.6647379047286499,
+        "rmse": 1.236589265361122,
+        "p95_abs_err": 2.7585072993008364,
+        "val_min": 9.813627304077148,
+        "val_med": 22.13971934890747,
+        "val_max": 36.181233612060545
+      }
+    },
+    "mag_pstotal_j0410": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 490165
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 3.9849789649768583,
+        "perplexity": 53.78415811498006,
+        "perplexity_frac": 0.052523591909160214,
+        "top10_mass": 0.533105
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.6253030862005761,
+        "rmse": 1.1991421503283142,
+        "p95_abs_err": 2.6882809385484068,
+        "val_min": 9.843289031982422,
+        "val_med": 22.054563848495484,
+        "val_max": 39.32562060546875
+      }
+    },
+    "mag_pstotal_j0430": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 21,
+        "files_missing_col": 0,
+        "rows_seen": 1449900,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 438045
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 3.8599806645498695,
+        "perplexity": 47.46443361379184,
+        "perplexity_frac": 0.046351985950968594,
+        "top10_mass": 0.550943
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.6469598816744673,
+        "rmse": 1.216582746762051,
+        "p95_abs_err": 2.715241460555791,
+        "val_min": 10.020522155761718,
+        "val_med": 22.103622112751008,
+        "val_max": 36.74962995910644
+      }
+    },
+    "mag_pstotal_j0515": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 19,
+        "files_missing_col": 0,
+        "rows_seen": 1283777,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 281425
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 4.1733502103849,
+        "perplexity": 64.93262607322619,
+        "perplexity_frac": 0.06341076764963495,
+        "top10_mass": 0.507971
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.5794812117521303,
+        "rmse": 1.1449797628804708,
+        "p95_abs_err": 2.545889949474205,
+        "val_min": 10.16612622833252,
+        "val_med": 21.977924820899965,
+        "val_max": 38.384544387817385
+      }
+    },
+    "mag_pstotal_j0660": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 17,
+        "files_missing_col": 0,
+        "rows_seen": 1157268,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 112081
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 4.890642020443055,
+        "perplexity": 133.0389603707493,
+        "perplexity_frac": 0.12992085973705986,
+        "top10_mass": 0.405337
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.4228280943557589,
+        "rmse": 0.9773281481227143,
+        "p95_abs_err": 2.1132638986938623,
+        "val_min": 10.97933885192871,
+        "val_med": 21.59202446126938,
+        "val_max": 36.14174216461181
+      }
+    },
+    "mag_pstotal_j0861": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 17,
+        "files_missing_col": 0,
+        "rows_seen": 1157268,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 138960
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.013498428853553,
+        "perplexity": 408.9113681844063,
+        "perplexity_frac": 0.39932750799258426,
+        "top10_mass": 0.215179
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.20690546259099704,
+        "rmse": 0.7081725916838704,
+        "p95_abs_err": 1.3763523135297475,
+        "val_min": 10.193242309570312,
+        "val_med": 20.75942436647415,
+        "val_max": 37.62302925109863
+      }
+    },
+    "mag_pstotal_r": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 22619
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 4.371101493411394,
+        "perplexity": 79.13074570803948,
+        "perplexity_frac": 0.07727611885550731,
+        "top10_mass": 0.478653
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.41982805261004985,
+        "rmse": 0.8219357118930354,
+        "p95_abs_err": 1.797882735835665,
+        "val_min": 11.31975946044922,
+        "val_med": 21.895288728237155,
+        "val_max": 35.55610272979736
+      }
+    },
+    "mag_pstotal_u": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 22,
+        "files_missing_col": 0,
+        "rows_seen": 1540788,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 477797
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 2.415710062270913,
+        "perplexity": 11.197718612847936,
+        "perplexity_frac": 0.010935272082859313,
+        "top10_mass": 0.742021
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 1.0255112372954507,
+        "rmse": 1.56647523904589,
+        "p95_abs_err": 3.301416519247367,
+        "val_min": 10.928222290039063,
+        "val_med": 22.702978991031646,
+        "val_max": 38.39383935546875
+      }
+    },
+    "mag_pstotal_z": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 16,
+        "files_missing_col": 0,
+        "rows_seen": 1093474,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 54776
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.072585008653858,
+        "perplexity": 433.8006117716897,
+        "perplexity_frac": 0.42363340993329074,
+        "top10_mass": 0.201858
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.14604121712001294,
+        "rmse": 0.5136869935211569,
+        "p95_abs_err": 1.0154667720762571,
+        "val_min": 10.807856765747069,
+        "val_med": 20.80249457216263,
+        "val_max": 35.705201766967775
+      }
+    },
+    "specz_e_z": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 5043,
+        "nan_inf_dropped": 3686540
+      },
+      "dist": {
+        "n": 5043,
+        "used_bins": 886,
+        "used_bins_frac": 0.865234375,
+        "entropy_nats": 6.004731644133777,
+        "perplexity": 405.3421981820519,
+        "perplexity_frac": 0.39584199041216006,
+        "top10_mass": 0.21931390045607776
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.4621865058820331,
+        "rmse": 10.939917863948263,
+        "p95_abs_err": 1.4999999999999823e-06,
+        "val_min": 3.335641e-07,
+        "val_med": 1.5280453e-05,
+        "val_max": 0.2114
+      }
+    },
+    "specz_z": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 9182,
+        "nan_inf_dropped": 3682401
+      },
+      "dist": {
+        "n": 9182,
+        "used_bins": 910,
+        "used_bins_frac": 0.888671875,
+        "entropy_nats": 6.3440136606548645,
+        "perplexity": 569.075810944638,
+        "perplexity_frac": 0.555738096625623,
+        "top10_mass": 0.07242430842953605
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.006779680834268206,
+        "rmse": 0.034056066050396225,
+        "p95_abs_err": 0.017151880610351933,
+        "val_min": -0.002704204,
+        "val_med": 0.5688599999999999,
+        "val_max": 6.12497
+      }
+    },
+    "theta_det": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 15,
+        "files_missing_col": 0,
+        "rows_seen": 1024252,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 0
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.893947181709581,
+        "perplexity": 986.2867972296316,
+        "perplexity_frac": 0.9631707004195621,
+        "top10_mass": 0.026965999999999997
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.04379321380563149,
+        "rmse": 0.05094581408630534,
+        "p95_abs_err": 0.08673827610909939,
+        "val_min": -89.99994659423828,
+        "val_med": -2.8495458364486694,
+        "val_max": 89.99996185302734
+      }
+    },
+    "vista_hapermag6": {
+      "status": "no_data",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 0,
+        "nan_inf_dropped": 3691583
+      }
+    },
+    "vista_hapermag6err": {
+      "status": "no_data",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 0,
+        "nan_inf_dropped": 3691583
+      }
+    },
+    "vista_japermag6": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 30,
+        "files_missing_col": 0,
+        "rows_seen": 2122779,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 1098105
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.876016218244404,
+        "perplexity": 968.7593364475608,
+        "perplexity_frac": 0.9460540394995711,
+        "top10_mass": 0.027392999999999997
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.012808252346912598,
+        "rmse": 0.13439111509551324,
+        "p95_abs_err": 0.009466826904295001,
+        "val_min": 9.451141,
+        "val_med": 18.2435045,
+        "val_max": 28.249353
+      }
+    },
+    "vista_japermag6err": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 30,
+        "files_missing_col": 0,
+        "rows_seen": 2122779,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 1098105
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.86501120217948,
+        "perplexity": 958.1565731854337,
+        "perplexity_frac": 0.9356997785014001,
+        "top10_mass": 0.028048999999999998
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 1.1959213109717513,
+        "rmse": 26.335420497100458,
+        "p95_abs_err": 0.001820557128906275,
+        "val_min": 0.000199,
+        "val_med": 0.1295595,
+        "val_max": 1176.0321
+      }
+    },
+    "vista_ksapermag6": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 38,
+        "files_missing_col": 0,
+        "rows_seen": 2688738,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 1671714
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.906051725202056,
+        "perplexity": 998.2978964440316,
+        "perplexity_frac": 0.9749002894961246,
+        "top10_mass": 0.024465
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.011982665135118174,
+        "rmse": 0.12404760315527577,
+        "p95_abs_err": 0.008339502954101704,
+        "val_min": 8.659229,
+        "val_med": 16.798212,
+        "val_max": 27.625986
+      }
+    },
+    "vista_ksapermag6err": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 38,
+        "files_missing_col": 0,
+        "rows_seen": 2688738,
+        "values_collected_finite": 1000000,
+        "nan_inf_dropped": 1671714
+      },
+      "dist": {
+        "n": 1000000,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.900135596102535,
+        "perplexity": 992.40927331165,
+        "perplexity_frac": 0.9691496809684083,
+        "top10_mass": 0.024196
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 1.752983393963496,
+        "rmse": 47.65577617265215,
+        "p95_abs_err": 0.001590948046875031,
+        "val_min": 0.000279,
+        "val_med": 0.178703,
+        "val_max": 4227.0923
+      }
+    },
+    "vista_yapermag6": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 160679,
+        "nan_inf_dropped": 3530904
+      },
+      "dist": {
+        "n": 160679,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.843555418604942,
+        "perplexity": 937.8175482303802,
+        "perplexity_frac": 0.9158374494437307,
+        "top10_mass": 0.03290411316973593
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 0.015406924928785481,
+        "rmse": 0.15870490292565562,
+        "p95_abs_err": 0.010731356103513444,
+        "val_min": 9.733725,
+        "val_med": 19.06041,
+        "val_max": 26.774128
+      }
+    },
+    "vista_yapermag6err": {
+      "status": "ok",
+      "meta": {
+        "files_considered": 50,
+        "files_with_col": 50,
+        "files_missing_col": 0,
+        "rows_seen": 3691583,
+        "values_collected_finite": 160679,
+        "nan_inf_dropped": 3530904
+      },
+      "dist": {
+        "n": 160679,
+        "used_bins": 1024,
+        "used_bins_frac": 1.0,
+        "entropy_nats": 6.906718568955297,
+        "perplexity": 998.963827171344,
+        "perplexity_frac": 0.9755506124720156,
+        "top10_mass": 0.02310818464142794
+      },
+      "quant_error_midpoint": {
+        "status": "ok",
+        "mae": 1.4246058875923742,
+        "rmse": 43.022976964463744,
+        "p95_abs_err": 0.0009642662597656235,
+        "val_min": 0.000233,
+        "val_med": 0.118054,
+        "val_max": 137.23108
+      }
+    }
+  }
+}

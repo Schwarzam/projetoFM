@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any
 
 import numpy as np
 import polars as pl
@@ -18,7 +18,7 @@ TOKENIZER_CONFIG = "scalar_tokenizer_config.npz"
 OUTPUT_DIR = "scalar_tokens"
 
 # Which column to use as ID in priority order
-PREFERRED_ID_COLS = ["gaia_source_id", "id"]
+PREFERRED_ID_COLS = ["id"]
 
 # Token range: N_BINS=1024 fits in uint16
 TOKEN_DTYPE = np.uint16
@@ -26,6 +26,21 @@ TOKEN_DTYPE = np.uint16
 # If no ID column exists, optionally store row indices so you can align later
 SAVE_ROW_INDEX_IF_NO_ID = True
 
+# --- row filter: keep only objects within this r-band range ---
+MAG_FILTER_COL = "mag_pstotal_r"
+MAG_MIN = 14.0
+MAG_MAX = 22.0
+APPLY_ROW_FILTER = True  # set False to disable
+
+# --- error filter / clip for photometric errors ---
+# You asked: mag_err < 2
+ERR_MAX = 2.0
+APPLY_ERR_CLIP = True  # clip err_mag_pstotal_* into [0, ERR_MAX]
+# If you instead want to DROP rows where any err_mag_pstotal_* > ERR_MAX:
+DROP_ROWS_ON_ERR = False
+
+# If dropping rows, which bands to consider (None = whatever err_mag_pstotal_* cols exist in file)
+ERR_COL_PREFIX = "err_mag_pstotal_"
 
 # =========================
 # HELPERS
@@ -96,10 +111,7 @@ def pick_scalar_cols_for_file(
     Keeps a stable order: config order first.
     """
     file_set = set(file_columns)
-
-    # stable order based on config insertion order
-    scalar_cols = [c for c in bin_edges.keys() if c in file_set]
-    return scalar_cols
+    return [c for c in bin_edges.keys() if c in file_set]
 
 
 def encode_column_values_to_tokens(vals: np.ndarray, edges: np.ndarray) -> np.ndarray:
@@ -110,7 +122,7 @@ def encode_column_values_to_tokens(vals: np.ndarray, edges: np.ndarray) -> np.nd
     """
     idx = np.searchsorted(edges, vals, side="right") - 1
     idx = np.clip(idx, 0, len(edges) - 2)
-    return idx.astype(TOKEN_DTYPE)
+    return idx.astype(TOKEN_DTYPE, copy=False)
 
 
 def series_to_float64_array(s: pl.Series) -> np.ndarray:
@@ -118,14 +130,40 @@ def series_to_float64_array(s: pl.Series) -> np.ndarray:
     Convert numeric (int/float/bool) Polars Series into float64 numpy array.
     """
     if s.dtype == pl.Boolean:
-        return s.cast(pl.UInt8).to_numpy().astype(np.float64)
+        return s.cast(pl.UInt8).to_numpy().astype(np.float64, copy=False)
     if s.dtype.is_float():
-        return s.to_numpy().astype(np.float64)
+        return s.to_numpy().astype(np.float64, copy=False)
     if s.dtype.is_integer():
-        return s.to_numpy().astype(np.float64)
+        return s.to_numpy().astype(np.float64, copy=False)
 
     # Fallback: try to cast in polars then to numpy
-    return s.cast(pl.Float64).to_numpy()
+    return s.cast(pl.Float64).to_numpy().astype(np.float64, copy=False)
+
+
+def apply_row_filters(df: pl.DataFrame, cols_in_df: List[str]) -> pl.DataFrame:
+    """
+    Applies:
+      - MAG range filter (row-level)
+      - optional DROP_ROWS_ON_ERR based on err_mag_pstotal_* cols available
+    """
+    if APPLY_ROW_FILTER:
+        if MAG_FILTER_COL not in cols_in_df:
+            # cannot filter without mag col
+            return df.head(0)
+        df = df.filter((pl.col(MAG_FILTER_COL) > MAG_MIN) & (pl.col(MAG_FILTER_COL) < MAG_MAX))
+        if df.height == 0:
+            return df
+
+    if DROP_ROWS_ON_ERR:
+        err_cols = [c for c in cols_in_df if c.startswith(ERR_COL_PREFIX)]
+        if err_cols:
+            # keep rows where all finite and <= ERR_MAX
+            cond = None
+            for c in err_cols:
+                cnd = pl.col(c).is_finite() & (pl.col(c) <= ERR_MAX) & (pl.col(c) >= 0)
+                cond = cnd if cond is None else (cond & cnd)
+            df = df.filter(cond)
+    return df
 
 
 # =========================
@@ -163,8 +201,21 @@ def encode_all_files():
 
         # columns to read (unique, preserve order)
         cols_to_read: List[str] = list(scalar_cols)
+
+        # For row filtering we must read the filter col (if enabled)
+        if APPLY_ROW_FILTER and MAG_FILTER_COL not in cols_to_read:
+            cols_to_read.append(MAG_FILTER_COL)
+
+        # For DROP_ROWS_ON_ERR we must read err cols to test conditions
+        if DROP_ROWS_ON_ERR:
+            for c in file_cols:
+                if c.startswith(ERR_COL_PREFIX) and c not in cols_to_read:
+                    cols_to_read.append(c)
+
         if id_col is not None:
             cols_to_read.append(id_col)
+
+        # de-dup while preserving order
         cols_to_read = list(dict.fromkeys(cols_to_read))
 
         # read only needed columns
@@ -174,23 +225,43 @@ def encode_all_files():
             print(f"  [warn] Could not read columns from {p.name}: {e}")
             continue
 
+        # apply row filters (mag range + optional err drop)
+        df = apply_row_filters(df, df.columns)
         n_rows = df.height
+        if n_rows == 0:
+            print("  -> no rows after filters, skipping.")
+            continue
+
+        # recompute which scalar cols are still present (they are), keep original order
+        scalar_cols_present = [c for c in scalar_cols if c in df.columns]
+
         print(f"  -> rows: {n_rows}")
-        print(f"  -> scalar columns used: {len(scalar_cols)}")
-        print(f"  -> id_col: {id_col if id_col is not None else '(none)'}")
+        print(f"  -> scalar columns used: {len(scalar_cols_present)}")
+        print(f"  -> id_col: {id_col if id_col is not None and id_col in df.columns else '(none)'}")
+        if APPLY_ROW_FILTER:
+            print(f"  -> mag filter: {MAG_MIN} < {MAG_FILTER_COL} < {MAG_MAX}")
+        if APPLY_ERR_CLIP:
+            print(f"  -> err clip: {ERR_COL_PREFIX}* clipped to [0, {ERR_MAX}]")
+        if DROP_ROWS_ON_ERR:
+            print(f"  -> err drop: dropping rows where any {ERR_COL_PREFIX}* > {ERR_MAX} or non-finite")
 
-        scalar_tokens = np.empty((n_rows, len(scalar_cols)), dtype=TOKEN_DTYPE)
+        scalar_tokens = np.empty((n_rows, len(scalar_cols_present)), dtype=TOKEN_DTYPE)
 
-        for j, col in enumerate(scalar_cols):
+        for j, col in enumerate(scalar_cols_present):
             s = df[col]
             arr = series_to_float64_array(s)
 
-            # fill non-finite values with mean (or 0.0)
+            # Fill non-finite with mean (or 0.0)
             default_val = float(col_means.get(col, 0.0))
             if arr.size:
                 bad = ~np.isfinite(arr)
                 if np.any(bad):
                     arr[bad] = default_val
+
+            # Apply err_mag_pstotal_* filter/clip you asked for (mag_err < 2)
+            if APPLY_ERR_CLIP and col.startswith(ERR_COL_PREFIX):
+                # keep in a sane physical range
+                arr = np.clip(arr, 0.0, ERR_MAX)
 
             edges = bin_edges[col]
             scalar_tokens[:, j] = encode_column_values_to_tokens(arr, edges)
@@ -199,7 +270,11 @@ def encode_all_files():
         out_ids: np.ndarray
         out_id_col: str
         if id_col is not None and id_col in df.columns:
-            out_ids = df[id_col].to_numpy()
+            # keep as-is; if you know it's int, you can cast to Int64 here
+            try:
+                out_ids = df[id_col].cast(pl.Int64).to_numpy()
+            except Exception:
+                out_ids = df[id_col].to_numpy()
             out_id_col = id_col
         else:
             out_ids = np.array([], dtype=np.int64)
@@ -207,7 +282,7 @@ def encode_all_files():
 
         out_data: Dict[str, Any] = {
             "scalar_tokens": scalar_tokens,
-            "scalar_cols": np.array(scalar_cols, dtype=object),
+            "scalar_cols": np.array(scalar_cols_present, dtype=object),
             "ids": out_ids,
             "id_col": np.array([out_id_col], dtype=object),
             "N_BINS": np.array([n_bins], dtype=np.int64),
@@ -220,10 +295,7 @@ def encode_all_files():
         out_path = Path(OUTPUT_DIR) / out_name
         np.savez_compressed(out_path, **out_data)
 
-        print(
-            f"  -> saved {out_path} "
-            f"(scalar_tokens shape={scalar_tokens.shape})"
-        )
+        print(f"  -> saved {out_path} (scalar_tokens shape={scalar_tokens.shape})")
 
 
 if __name__ == "__main__":

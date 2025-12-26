@@ -5,3 +5,4 @@ __pycache__/
 output*/
 
 spectrum_tokenizers/spectrum_tokens
+scalar_tokenizers/scalar_tokens
