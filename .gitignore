@@ -3,3 +3,5 @@ datacube*
 __pycache__/
 
 output*/
+
+spectrum_tokenizers/spectrum_tokens

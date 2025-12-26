@@ -320,7 +320,7 @@ def load_parquet(
     path: str,
     use_columns: Sequence[str],
 ) -> pl.DataFrame:
-    df = pl.read_parquet(path, columns=use_columns)
+    df = pl.read_parquet(path, columns=use_columns, use_pyarrow=True)
 
     if REQUIRE_F378_NOT_NULL and "splus_cut_F378" in df.columns:
         df = df.filter(pl.col("splus_cut_F378").is_not_null())
