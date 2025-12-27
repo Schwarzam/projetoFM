@@ -6,3 +6,8 @@ output*/
 
 spectrum_tokenizers/spectrum_tokens
 scalar_tokenizers/scalar_tokens
+
+runs_tokens_transformer/*
+runs_tokens_transformer
+
+bench_tokens_transformer

@@ -211,6 +211,12 @@ def process_all_files():
 
     # 2) Encode each file to tokens
     for f in files:
+        out_name = f.stem.replace("_latents", "") + "_tokens.npz"
+        out_path = Path(TOKENS_DIR) / out_name
+        if out_path.exists():
+            print(f"\n[tokens] Skipping {f.name}, output already exists.")
+            continue
+        
         print(f"\n[tokens] Processing {f.name}")
         latents, ids, id_col = load_latents_from_npz(f)
 
