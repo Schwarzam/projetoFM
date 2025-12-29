@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/astromodal/__init__.py
+src/astromodal.egg-info/PKG-INFO
+src/astromodal.egg-info/SOURCES.txt
+src/astromodal.egg-info/dependency_links.txt
+src/astromodal.egg-info/requires.txt
+src/astromodal.egg-info/top_level.txt
+src/astromodal/config/__init__.py
+src/astromodal/core/__init__.py
+src/astromodal/data/__init__.py
+src/astromodal/data/surveys/__init__.py
+src/astromodal/datasets/__init__.py
+src/astromodal/models/__init__.py
+src/astromodal/tokenizers/__init__.py
+src/astromodal/training/__init__.py

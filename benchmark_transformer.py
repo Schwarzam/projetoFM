@@ -3,36 +3,23 @@
 """
 Benchmark for your AION-like token Transformer trained by train_transformer_tokens.py.
 
-✅ Matches *training* vocab/type layout exactly:
-  - Uses ckpt["config"]["offsets"] if present (base_image/base_scalar/base_spectrum)
-  - Uses the fixed SPECTRUM_GROUPS order from training script
-  - Uses n_types from checkpoint type_emb rows (no mismatch)
-✅ Fixes NPZ BadZipFile in DataLoader workers:
-  - Option A (default): NUM_WORKERS=0 (safe)
-  - Option B: if you want workers, we open spectrum NPZ *per worker* lazily.
-✅ Reports:
-  - loss/token, perplexity
-  - accuracy overall AND accuracy excluding {PAD,BOS,EOS,SEP,MISS}
-  - per-segment accuracy excluding MISS
-  - missing fraction per segment
-  - token-usage stats (entropy/top10 mass)
-✅ Forces GPU #1:
-  - sets CUDA_VISIBLE_DEVICES=1 before torch import
+Fixes vs your previous benchmark:
+✅ Uses the SAME token file templates as training (no extra subfolders)
+✅ Loads checkpoint STRICTLY (no silent random weights)
+✅ Infers vocab_size, d_model, n_types, max_len, d_ff, n_layers from checkpoint tensors
+✅ Keeps safe NPZ access (default NUM_WORKERS=0)
 
 Run:
-  python3 benchmark_transformer.py
-
-Tip:
-  Set CKPT_PATH to a specific file, not a wildcard.
+  python3 benchmark_transformer_fixed.py
 """
 
 from __future__ import annotations
 
 # ---------------------------
-# FORCE GPU #1 (must be before torch import)
+# FORCE GPU (must be before torch import)
 # ---------------------------
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # change if you want another GPU
 
 import math
 import json
@@ -60,31 +47,28 @@ import matplotlib.pyplot as plt
 # ============================================================
 
 # ---- checkpoint (use a concrete file path) ----
-CKPT_PATH = "runs_tokens_transformer/ckpt_epoch_003.pt"
+CKPT_PATH = "runs_tokens_transformer/ckpt_step_01090000.pt"
 
-# ---- data templates (must match training) ----
+# ---- data templates (MUST match training) ----
 FIELDS: List[str] = [
     "HYDRA-0012",
     "HYDRA-0013",
-    "HYDRA-0014",
-    "HYDRA-0015",
-    "HYDRA-0016",
-    "HYDRA-0017",
 ]  # if empty -> auto-discover
+
 DATACUBE_TMPL = "/home/astrodados4/downloads/hypercube/datacube_{field}.parquet"
 
-IMAGE_TOKENS_TMPL    = "/home/schwarz/projetoFM/codecs/image_tokens/datacube_{field}_tokens.npz"
-SCALAR_TOKENS_TMPL   = "/home/schwarz/projetoFM/scalar_tokenizers/scalar_tokens/datacube_{field}_scalar_tokens.npz"
-SPECTRUM_TOKENS_TMPL = "/home/schwarz/projetoFM/spectrum_tokenizers/spectrum_tokens/datacube_{field}_spectrum_tokens.npz"
+IMAGE_TOKENS_TMPL   = "/home/schwarz/projetoFM/codecs/image_tokens/datacube_{field}_tokens.npz"
+SCALAR_TOKENS_TMPL  = "/home/schwarz/projetoFM/scalar_tokenizers/datacube_{field}_scalar_tokens.npz"
+SPECTRUM_TOKENS_TMPL= "/home/schwarz/projetoFM/spectrum_tokenizers/datacube_{field}_spectrum_tokens.npz"
 
-# ---- row filter (must match training) ----
+# ---- row filter (should match training) ----
 MAG_MIN = 14.0
 MAG_MAX = 22.0
 MAGERR_MAX = 2.0
 MAG_COL = "mag_pstotal_r"
 MAGERR_COL = "err_mag_pstotal_r"
 
-# ---- token vocab sizes (must match training) ----
+# ---- token vocab sizes (must match training generator) ----
 V_IMAGE   = 2048
 V_SCALAR  = 1024
 V_SPECTRA = 2048
@@ -98,11 +82,11 @@ SPECTRUM_GROUPS = {
     "desi_z":    ("tokens_desi_z_flat",    "tokens_desi_z_indptr"),
 }
 
-# ---- sequence construction (must match training caps) ----
+# ---- sequence caps (must match training caps) ----
 MAX_IMAGE_TOKENS = 24 * 24
 MAX_SCALAR_TOKENS = 512
 MAX_SPEC_TOKENS_PER_GROUP = 512
-MAX_SEQ_LEN = 2048
+MAX_SEQ_LEN_FALLBACK = 2048  # will be overridden by ckpt pos_emb if present
 
 # ---- benchmark params ----
 OUT_DIR = "bench_tokens_transformer"
@@ -110,7 +94,7 @@ SEED = 0
 N_SAMPLES_LIMIT: Optional[int] = 50_000  # set None for all
 BATCH_SIZE = 16
 
-# IMPORTANT: safest is 0 because np.load(npz) inside workers can trip zipfile overlap checks.
+# safest default: 0 because np.load(npz) inside workers can trip zipfile overlap checks.
 NUM_WORKERS = 0
 PIN_MEMORY = True
 
@@ -175,9 +159,37 @@ def topk_mass(counts: np.ndarray, k: int = 10) -> float:
     s = np.sort(counts)[::-1]
     return float(s[:k].sum() / n)
 
+def infer_n_layers_from_state(state: dict) -> int:
+    # keys look like: enc.layers.0.self_attn.in_proj_weight
+    mx = -1
+    for k in state.keys():
+        if k.startswith("enc.layers."):
+            rest = k[len("enc.layers."):]
+            idx_str = rest.split(".", 1)[0]
+            if idx_str.isdigit():
+                mx = max(mx, int(idx_str))
+    return (mx + 1) if mx >= 0 else 1
+
+def infer_d_ff_from_state(state: dict) -> int:
+    # linear1.weight shape: (d_ff, d_model)
+    for k, v in state.items():
+        if k.endswith("enc.layers.0.linear1.weight") and hasattr(v, "shape"):
+            return int(v.shape[0])
+    # fallback
+    return 2048
+
+def choose_n_heads(d_model: int) -> int:
+    # prefer head_dim=64 if possible, else a divisor
+    if d_model % 64 == 0:
+        return d_model // 64
+    for h in [16, 12, 8, 6, 4, 2, 1]:
+        if d_model % h == 0:
+            return h
+    return 1
+
 
 # ============================================================
-# VOCAB SPEC (match training, with optional ckpt offsets)
+# VOCAB SPEC (match training, use ckpt offsets when available)
 # ============================================================
 
 @dataclass(frozen=True)
@@ -192,30 +204,21 @@ class VocabSpec:
     base_spectrum: Dict[str, int]
     vocab_size: int
 
-def build_vocab_spec_from_training_or_ckpt(ckpt: dict) -> VocabSpec:
+def build_vocab_spec_from_ckpt_or_default(ckpt: dict, ckpt_vocab_size: int) -> VocabSpec:
     # training used fixed specials
     PAD, BOS, EOS, SEP, MISS = 0, 1, 2, 3, 4
 
-    offsets = None
     cfg = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
-    if isinstance(cfg, dict):
-        offsets = cfg.get("offsets", None)
+    offsets = cfg.get("offsets", None) if isinstance(cfg, dict) else None
 
     if isinstance(offsets, dict) and ("base_image" in offsets) and ("base_scalar" in offsets) and ("base_spectrum" in offsets):
         base_image = int(offsets["base_image"])
         base_scalar = int(offsets["base_scalar"])
-        base_spectrum_raw = offsets["base_spectrum"]
-        base_spectrum = {str(k): int(v) for k, v in base_spectrum_raw.items()}
-
-        vocab_size = int(cfg.get("vocab_size", 0)) or (max(base_spectrum.values(), default=base_scalar) + V_SPECTRA)
-        # Make sure it includes the last group span
-        if base_spectrum:
-            last_base = max(base_spectrum.values())
-            vocab_size = max(vocab_size, last_base + V_SPECTRA)
+        base_spectrum = {str(k): int(v) for k, v in offsets["base_spectrum"].items()}
         return VocabSpec(
             pad_id=PAD, bos_id=BOS, eos_id=EOS, sep_id=SEP, miss_id=MISS,
             base_image=base_image, base_scalar=base_scalar, base_spectrum=base_spectrum,
-            vocab_size=vocab_size,
+            vocab_size=int(ckpt_vocab_size),
         )
 
     # fallback: rebuild exactly like training script
@@ -226,10 +229,18 @@ def build_vocab_spec_from_training_or_ckpt(ckpt: dict) -> VocabSpec:
     for g in SPECTRUM_GROUPS.keys():
         base_spectrum[g] = next_id
         next_id += V_SPECTRA
+
+    if next_id != ckpt_vocab_size:
+        raise RuntimeError(
+            f"Vocab mismatch: default layout gives vocab_size={next_id} "
+            f"but checkpoint tok_emb has vocab_size={ckpt_vocab_size}. "
+            f"Your ckpt likely used different offsets—save offsets in ckpt['config']['offsets']."
+        )
+
     return VocabSpec(
         pad_id=PAD, bos_id=BOS, eos_id=EOS, sep_id=SEP, miss_id=MISS,
         base_image=base_image, base_scalar=base_scalar, base_spectrum=base_spectrum,
-        vocab_size=next_id,
+        vocab_size=int(next_id),
     )
 
 
@@ -243,17 +254,8 @@ TT_SCALAR = 2
 TT_SPEC_BASE = 10  # + group index in SPECTRUM_GROUPS order
 
 
-def compute_n_types_from_ckpt_state(state_dict: dict) -> int:
-    # training used: n_types = TT_SPEC_BASE + len(SPECTRUM_GROUPS) + 5
-    # but safest is to read embedding rows from checkpoint.
-    w = state_dict.get("type_emb.weight", None)
-    if w is None:
-        return TT_SPEC_BASE + len(SPECTRUM_GROUPS) + 5
-    return int(w.shape[0])
-
-
 # ============================================================
-# MODEL (must match training)
+# MODEL (must match training module structure)
 # ============================================================
 
 class CausalTransformerLM(nn.Module):
@@ -275,7 +277,7 @@ class CausalTransformerLM(nn.Module):
             dropout=dropout,
             batch_first=True,
             activation="gelu",
-            norm_first=False,  # match training (and avoids nested tensor warning)
+            norm_first=False,
         )
         self.enc = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
         self.ln = nn.LayerNorm(d_model)
@@ -289,7 +291,7 @@ class CausalTransformerLM(nn.Module):
         pos = torch.arange(L, device=tokens.device).unsqueeze(0).expand(B, L)
         x = self.tok_emb(tokens) + self.type_emb(types) + self.pos_emb(pos)
 
-        key_padding_mask = ~attn_mask  # True where pad
+        key_padding_mask = ~attn_mask
         causal_mask = torch.triu(torch.ones(L, L, device=tokens.device, dtype=torch.bool), diagonal=1)
 
         h = self.enc(x, mask=causal_mask, src_key_padding_mask=key_padding_mask)
@@ -302,9 +304,7 @@ class CausalTransformerLM(nn.Module):
 # ============================================================
 
 class LazySpectrumNPZ:
-    """
-    Opens the spectrum npz lazily in the *current process* (important for DataLoader workers).
-    """
+    """Open the spectrum npz lazily in the current process (important for DataLoader workers)."""
     def __init__(self, path: str):
         self.path = path
         self._npz = None
@@ -324,13 +324,12 @@ class LazySpectrumNPZ:
 
 
 # ============================================================
-# FIELD INDEXER (match training loading semantics)
+# FIELD INDEXER
 # ============================================================
 
 class FieldIndex:
     def __init__(self, field: str):
         self.field = field
-
         self.df = None
 
         # image
@@ -341,8 +340,7 @@ class FieldIndex:
         self.scalar_tokens: Optional[np.ndarray] = None
         self.splus_id_to_scalar_row: Dict[str, int] = {}
 
-        # spectrum (lazy per-process)
-        self.spe_path: Optional[str] = None
+        # spectrum (lazy)
         self.spe_lazy: Optional[LazySpectrumNPZ] = None
         self.splus_id_to_spec_row: Dict[str, int] = {}
         self.spec_groups_present: Dict[str, Tuple[str, str]] = {}
@@ -363,7 +361,7 @@ class FieldIndex:
         df["gaia_source_id"] = df["gaia_source_id"].map(norm_gaia_id)
         self.df = df
 
-        # image npz (load eagerly, small enough)
+        # image
         ip = IMAGE_TOKENS_TMPL.format(field=self.field)
         if Path(ip).exists():
             npz = np.load(ip, allow_pickle=True)
@@ -374,7 +372,7 @@ class FieldIndex:
                 self.img_id_to_row = {gid: i for i, gid in enumerate(ids) if gid is not None}
             npz.close()
 
-        # scalar npz (load eagerly)
+        # scalar
         sp = SCALAR_TOKENS_TMPL.format(field=self.field)
         if Path(sp).exists():
             npz = np.load(sp, allow_pickle=True)
@@ -383,21 +381,10 @@ class FieldIndex:
                 self.scalar_tokens = npz["scalar_tokens"]
                 self.splus_id_to_scalar_row = {sid: i for i, sid in enumerate(ids) if sid}
             npz.close()
-            
-            if self.scalar_tokens is not None:
-                df_ids = self.df["id"].astype(str).map(norm_splus_id).values
-                hit = sum((sid in self.splus_id_to_scalar_row) for sid in df_ids[:5000])
-                print(f"[scalar] {self.field}: scalar_rows={len(self.scalar_tokens)} "
-                    f"df_rows={len(self.df)} hits_first5k={hit}/5000 "
-                    f"example_df_id={df_ids[0] if len(df_ids) else None} "
-                    f"example_npz_id={next(iter(self.splus_id_to_scalar_row.keys()), None)}")
-            else:
-                print(f"[scalar] {self.field}: NOT LOADED (file missing or keys mismatch)")
 
-        # spectrum npz (LAZY open in each process)
+        # spectrum (lazy open per process)
         xp = SPECTRUM_TOKENS_TMPL.format(field=self.field)
         if Path(xp).exists():
-            # read just ids and which groups exist using a short open, then close
             npz = np.load(xp, allow_pickle=True)
             if "ids" in npz.files:
                 ids = [norm_splus_id(x) for x in np.asarray(npz["ids"], dtype=object)]
@@ -405,7 +392,6 @@ class FieldIndex:
                 for g, (fk, ik) in SPECTRUM_GROUPS.items():
                     if fk in npz.files and ik in npz.files:
                         self.spec_groups_present[g] = (fk, ik)
-                self.spe_path = xp
                 self.spe_lazy = LazySpectrumNPZ(xp)
             npz.close()
 
@@ -417,21 +403,18 @@ class FieldIndex:
         sid = r["id"]
         gid = r["gaia_source_id"]
 
-        # image tokens
         img_tokens = None
         if gid is not None and self.img_tokens_flat is not None:
             j = self.img_id_to_row.get(gid, None)
             if j is not None:
                 img_tokens = self.img_tokens_flat[j]
 
-        # scalar tokens
         scalar_tokens = None
         if self.scalar_tokens is not None:
             j = self.splus_id_to_scalar_row.get(sid, None)
             if j is not None:
                 scalar_tokens = self.scalar_tokens[j]
 
-        # spectrum tokens (lazy open in this process)
         spec = {}
         if self.spe_lazy is not None and self.spec_groups_present:
             j = self.splus_id_to_spec_row.get(sid, None)
@@ -443,7 +426,13 @@ class FieldIndex:
                     a = int(indp[j]); b = int(indp[j + 1])
                     spec[g] = flat[a:b]
 
-        return {"id": sid, "gaia_source_id": gid, "image_tokens": img_tokens, "scalar_tokens": scalar_tokens, "spectrum_tokens": spec}
+        return {
+            "id": sid,
+            "gaia_source_id": gid,
+            "image_tokens": img_tokens,
+            "scalar_tokens": scalar_tokens,
+            "spectrum_tokens": spec,
+        }
 
     def close(self):
         if self.spe_lazy is not None:
@@ -454,7 +443,7 @@ class FieldIndex:
 # SEQUENCE BUILDER (exactly training)
 # ============================================================
 
-def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray, np.ndarray, Dict[str, Tuple[int, int]]]:
+def build_sequence(sample: Dict[str, Any], vocab: VocabSpec, max_seq_len: int) -> Tuple[np.ndarray, np.ndarray, Dict[str, Tuple[int, int]]]:
     toks: List[int] = [vocab.bos_id]
     ttypes: List[int] = [TT_BOS]
     seg: Dict[str, Tuple[int, int]] = {}
@@ -488,7 +477,7 @@ def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray
         ttypes.extend([TT_SCALAR] * arr.size)
     seg["scalar"] = (a, len(toks))
 
-    # spectrum groups (fixed order)
+    # spectrum groups
     spec = sample["spectrum_tokens"] or {}
     for gi, g in enumerate(SPECTRUM_GROUPS.keys()):
         add_sep()
@@ -506,9 +495,9 @@ def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray
 
     toks.append(vocab.eos_id); ttypes.append(TT_BOS)
 
-    if len(toks) > MAX_SEQ_LEN:
-        toks = toks[:MAX_SEQ_LEN]
-        ttypes = ttypes[:MAX_SEQ_LEN]
+    if len(toks) > max_seq_len:
+        toks = toks[:max_seq_len]
+        ttypes = ttypes[:max_seq_len]
 
     return np.asarray(toks, np.int64), np.asarray(ttypes, np.int64), seg
 
@@ -518,8 +507,9 @@ def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray
 # ============================================================
 
 class MultiFieldDataset(Dataset):
-    def __init__(self, fields: List[str], vocab: VocabSpec, limit: Optional[int] = None):
+    def __init__(self, fields: List[str], vocab: VocabSpec, max_seq_len: int, limit: Optional[int] = None):
         self.vocab = vocab
+        self.max_seq_len = max_seq_len
         self.fidx: List[FieldIndex] = []
         self.map: List[Tuple[int, int]] = []
 
@@ -543,7 +533,7 @@ class MultiFieldDataset(Dataset):
     def __getitem__(self, idx: int):
         fi, ri = self.map[idx]
         s = self.fidx[fi].get_row(ri)
-        token_ids, type_ids, seg = build_sequence(s, self.vocab)
+        token_ids, type_ids, seg = build_sequence(s, self.vocab, max_seq_len=self.max_seq_len)
         return {"token_ids": token_ids, "type_ids": type_ids, "segments": seg, "raw": s}
 
     def close(self):
@@ -574,67 +564,71 @@ def collate(batch: List[Dict[str, Any]], pad_id: int):
 
 
 # ============================================================
-# MAIN BENCH
+# MAIN
 # ============================================================
 
 def main():
     set_seed(SEED)
     ensure_dir(OUT_DIR)
 
-    # ---- load ckpt ----
     ckpt_path = Path(CKPT_PATH)
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
     ckpt = torch.load(str(ckpt_path), map_location="cpu")
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    if not isinstance(state, dict):
+        raise RuntimeError("Checkpoint format not understood (expected a state_dict or dict with key 'model').")
 
-    # ---- build vocab from ckpt or training fallback ----
-    vocab = build_vocab_spec_from_training_or_ckpt(ckpt if isinstance(ckpt, dict) else {})
-    expected_vocab = 5 + V_IMAGE + V_SCALAR + V_SPECTRA * len(SPECTRUM_GROUPS)
-    print(f"[vocab] vocab_size={vocab.vocab_size} (expected {expected_vocab})")
-    if vocab.vocab_size != expected_vocab:
-        print("[warn] vocab_size differs from the expected training layout. If this is unintended, fix ckpt config offsets.")
+    # --- infer core shapes from checkpoint ---
+    if "tok_emb.weight" not in state or "type_emb.weight" not in state or "pos_emb.weight" not in state:
+        raise RuntimeError("Checkpoint missing tok_emb/type_emb/pos_emb weights. Are you benchmarking the right checkpoint?")
 
-    # ---- model config ----
+    ckpt_vocab_size = int(state["tok_emb.weight"].shape[0])
+    ckpt_d_model    = int(state["tok_emb.weight"].shape[1])
+    ckpt_n_types    = int(state["type_emb.weight"].shape[0])
+    ckpt_max_len    = int(state["pos_emb.weight"].shape[0])
+    ckpt_d_ff       = infer_d_ff_from_state(state)
+    ckpt_n_layers   = infer_n_layers_from_state(state)
+    ckpt_n_heads    = None
+
+    # Prefer ckpt config if present, otherwise pick a safe head count
     cfg = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
-    d_model = int(cfg.get("D_MODEL", 512))
-    n_layers = int(cfg.get("N_LAYERS", 8))
-    n_heads = int(cfg.get("N_HEADS", 8))
-    d_ff = int(cfg.get("D_FF", 2048))
-    max_len = int(cfg.get("MAX_SEQ_LEN", MAX_SEQ_LEN))
+    if isinstance(cfg, dict) and "N_HEADS" in cfg:
+        ckpt_n_heads = int(cfg["N_HEADS"])
+    else:
+        ckpt_n_heads = choose_n_heads(ckpt_d_model)
 
-    # safest: match n_types to checkpoint tensor shape
-    n_types = compute_n_types_from_ckpt_state(state)
+    if ckpt_d_model % ckpt_n_heads != 0:
+        raise RuntimeError(f"Invalid heads: d_model={ckpt_d_model} not divisible by n_heads={ckpt_n_heads}")
+
+    vocab = build_vocab_spec_from_ckpt_or_default(ckpt if isinstance(ckpt, dict) else {}, ckpt_vocab_size=ckpt_vocab_size)
+
+    print(f"[ckpt] tok_emb={tuple(state['tok_emb.weight'].shape)} type_emb={tuple(state['type_emb.weight'].shape)} pos_emb={tuple(state['pos_emb.weight'].shape)}")
+    print(f"[infer] vocab_size={ckpt_vocab_size} d_model={ckpt_d_model} n_types={ckpt_n_types} max_len={ckpt_max_len} d_ff={ckpt_d_ff} n_layers={ckpt_n_layers} n_heads={ckpt_n_heads}")
+    print(f"[vocab] base_image={vocab.base_image} base_scalar={vocab.base_scalar} base_spectrum_keys={list(vocab.base_spectrum.keys())[:3]}...")
 
     model = CausalTransformerLM(
-        vocab_size=vocab.vocab_size,
-        n_types=n_types,
-        d_model=d_model,
-        n_layers=n_layers,
-        n_heads=n_heads,
-        d_ff=d_ff,
+        vocab_size=ckpt_vocab_size,
+        n_types=ckpt_n_types,
+        d_model=ckpt_d_model,
+        n_layers=ckpt_n_layers,
+        n_heads=ckpt_n_heads,
+        d_ff=ckpt_d_ff,
         dropout=0.0,
-        max_len=max_len,
+        max_len=ckpt_max_len,
     )
-    # strict=True should work if vocab/type sizes match; keep strict=False for safety,
-    # but if you want hard failures, set strict=True.
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing:
-        print(f"[ckpt] missing keys: {missing[:8]}{'...' if len(missing)>8 else ''}")
-    if unexpected:
-        print(f"[ckpt] unexpected keys: {unexpected[:8]}{'...' if len(unexpected)>8 else ''}")
+
+    # STRICT LOAD: if this fails, your benchmark is not matching training
+    model.load_state_dict(state, strict=True)
 
     total_p, train_p = count_parameters(model)
-    print(f"[model] d_model={d_model} layers={n_layers} heads={n_heads} ff={d_ff}")
-    print(f"[model] n_types={n_types} max_len={max_len} vocab_size={vocab.vocab_size}")
     print(f"[model] params_total={total_p:,} params_trainable={train_p:,}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.eval()
     print(f"[env] device={device} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
-    if device == "cuda":
-        print(f"[env] torch.cuda.current_device()={torch.cuda.current_device()} name={torch.cuda.get_device_name(torch.cuda.current_device())}")
 
     # ---- fields ----
     fields = FIELDS or discover_fields_from_datacubes(DATACUBE_TMPL)
@@ -642,7 +636,7 @@ def main():
         raise RuntimeError("No fields found.")
     print(f"[data] fields={len(fields)}")
 
-    ds = MultiFieldDataset(fields, vocab=vocab, limit=N_SAMPLES_LIMIT)
+    ds = MultiFieldDataset(fields, vocab=vocab, max_seq_len=ckpt_max_len, limit=N_SAMPLES_LIMIT)
     dl = DataLoader(
         ds,
         batch_size=BATCH_SIZE,
@@ -660,7 +654,6 @@ def main():
     sum_correct = 0
     sum_total = 0
 
-    # "meaningful" accuracy excludes special + MISS
     sum_correct_nomiss = 0
     sum_total_nomiss = 0
 
@@ -676,6 +669,9 @@ def main():
 
     special_ids = torch.tensor([vocab.pad_id, vocab.bos_id, vocab.eos_id, vocab.sep_id], dtype=torch.long, device=device)
 
+    # quick one-time sanity on first batch
+    did_print_sanity = False
+
     pbar = tqdm(dl, desc="[bench]", dynamic_ncols=True)
     with torch.no_grad():
         for batch in pbar:
@@ -685,12 +681,22 @@ def main():
             segs = batch["segments"]
             raws = batch["raws"]
 
+            if not did_print_sanity and len(raws) > 0:
+                r0 = raws[0]
+                print("[sanity] first sample:", {
+                    "img_none": r0["image_tokens"] is None,
+                    "sca_none": r0["scalar_tokens"] is None,
+                    "spec_keys": list((r0["spectrum_tokens"] or {}).keys()),
+                })
+                did_print_sanity = True
+
             x = tokens[:, :-1]
             x_types = types[:, :-1]
             x_mask = attn_mask[:, :-1]
             y = tokens[:, 1:]
 
             logits = model(x, x_types, x_mask)
+
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 y.reshape(-1),
@@ -702,7 +708,6 @@ def main():
             preds = logits.argmax(dim=-1)
             correct = (preds == y) & valid
 
-            # exclude specials + MISS
             is_special = (y[..., None] == special_ids[None, None, :]).any(dim=-1)
             valid_nomiss = valid & (~is_special) & (y != vocab.miss_id)
 
@@ -746,7 +751,6 @@ def main():
                     seg_total_nomiss[k] += int(vv_nomiss.sum().item())
                     seg_correct_nomiss[k] += int(((pp == yy) & vv_nomiss).sum().item())
 
-                    # usage from ground truth, excluding PAD/MISS/special
                     yy_np = yy[vv_nomiss].detach().cpu().numpy()
                     if yy_np.size > 0:
                         if k == "image":
@@ -756,20 +760,22 @@ def main():
                             local = yy_np - vocab.base_scalar
                             local = local[(local >= 0) & (local < V_SCALAR)]
                         else:
-                            local = yy_np - vocab.base_spectrum[k]
+                            base = vocab.base_spectrum.get(k, None)
+                            if base is None:
+                                continue
+                            local = yy_np - base
                             local = local[(local >= 0) & (local < V_SPECTRA)]
                         if local.size > 0:
                             usage[k] += np.bincount(local, minlength=usage[k].shape[0]).astype(np.int64)
 
             avg_loss = (sum_loss / max(1, sum_tokens))
-            ppl = math.exp(avg_loss)
+            ppl = math.exp(min(50.0, avg_loss))  # clamp to avoid inf
             acc = sum_correct / max(1, sum_total)
             acc_nm = sum_correct_nomiss / max(1, sum_total_nomiss)
             pbar.set_postfix({"ppl": f"{ppl:.2f}", "acc": f"{acc*100:.2f}%", "acc_nomiss": f"{acc_nm*100:.2f}%"})
 
-    # ---- finalize ----
     avg_loss = sum_loss / max(1, sum_tokens)
-    ppl = math.exp(avg_loss)
+    ppl = math.exp(min(50.0, avg_loss))
     acc = sum_correct / max(1, sum_total)
     acc_nm = sum_correct_nomiss / max(1, sum_total_nomiss)
 
@@ -789,13 +795,13 @@ def main():
         "segment_tokens_excluding_miss": {k: int(seg_total_nomiss[k]) for k in seg_names},
         "segment_entropy": {},
         "model": {
-            "d_model": d_model,
-            "n_layers": n_layers,
-            "n_heads": n_heads,
-            "d_ff": d_ff,
-            "vocab_size": vocab.vocab_size,
-            "n_types": n_types,
-            "max_len": max_len,
+            "d_model": int(ckpt_d_model),
+            "n_layers": int(ckpt_n_layers),
+            "n_heads": int(ckpt_n_heads),
+            "d_ff": int(ckpt_d_ff),
+            "vocab_size": int(ckpt_vocab_size),
+            "n_types": int(ckpt_n_types),
+            "max_len": int(ckpt_max_len),
             "params_total": int(total_p),
         },
         "data": {
@@ -822,7 +828,6 @@ def main():
     print(f"[out] wrote {out_json}")
 
     # ---- plots ----
-    # 1) overall metrics
     plt.figure()
     plt.bar(["loss/token", "ppl", "acc% (all)", "acc% (no miss)"], [avg_loss, ppl, acc*100.0, acc_nm*100.0])
     plt.title("Overall benchmark")
@@ -830,7 +835,6 @@ def main():
     plt.savefig(Path(OUT_DIR) / "overall.png", dpi=180)
     plt.close()
 
-    # 2) segment accuracy (no miss)
     seg_acc = [
         (results["segment_accuracy_excluding_miss"][k] * 100.0) if results["segment_accuracy_excluding_miss"][k] is not None else 0.0
         for k in seg_names
@@ -844,7 +848,6 @@ def main():
     plt.savefig(Path(OUT_DIR) / "segment_accuracy_nomiss.png", dpi=180)
     plt.close()
 
-    # 3) missing coverage
     miss = [results["coverage_missing_frac"][k] * 100 for k in seg_names]
     plt.figure(figsize=(10, 4))
     plt.bar(seg_names, miss)
@@ -855,7 +858,6 @@ def main():
     plt.savefig(Path(OUT_DIR) / "segment_missing.png", dpi=180)
     plt.close()
 
-    # 4) token usage top-k per segment
     for k in seg_names:
         cnt = usage[k]
         if cnt.sum() == 0:
@@ -871,7 +873,6 @@ def main():
         plt.savefig(Path(OUT_DIR) / f"usage_top{topk}_{k}.png", dpi=180)
         plt.close()
 
-    # close dataset resources
     ds.close()
 
     print(f"[done] outputs in: {OUT_DIR}")

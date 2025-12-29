@@ -67,3 +67,92 @@ For each S-PLUS field in `dr6_list.csv` the script writes:
 ```
 
 Each `datacube_<FIELD>.parquet` contains all columns above, one row per S-PLUS source in that field.
+
+---
+
+# Astromodal: Foundation Model Package
+
+This repository has been reorganized into the **astromodal** Python package - a multi-modal transformer foundation model for astronomical data.
+
+## Installation
+
+```bash
+# Install in editable mode
+pip install -e .
+```
+
+## Quick Start Guide
+
+### Step 1: Train Tokenizers
+
+Train tokenizers for each data modality:
+
+```bash
+# Scalar tokenizer (quantile binning, 1024 bins)
+python examples/tokenizers/train_scalar.py
+
+# Spectrum tokenizer (KMeans, 2048 clusters per group)
+python examples/tokenizers/train_spectrum.py
+
+# Image tokenizer (autoencoder + KMeans codebook)
+python examples/tokenizers/train_image.py
+```
+
+### Step 2: Encode Data to Tokens
+
+Encode all datacubes to tokens:
+
+```bash
+# Encodes images, scalars, and spectra for all fields
+python examples/tokenizers/encode_all.py
+```
+
+Outputs:
+- `outputs/image_tokens/datacube_{field}_tokens.npz`
+- `outputs/image_latents/datacube_{field}_latents.npz`
+- `outputs/scalar_tokens/datacube_{field}_scalar_tokens.npz`
+- `outputs/spectrum_tokens/datacube_{field}_spectrum_tokens.npz`
+
+### Step 3: Train Transformer
+
+Train transformer with **reconstruction loss**:
+
+```bash
+python examples/training/train_transformer.py
+```
+
+The model learns to reconstruct actual data values:
+- **Images**: Expected centroid (softmax over vocab) vs true centroid
+- **Scalars**: Expected bin center vs true bin center
+- **Spectra**: Expected centroid vs true centroid
+
+This provides meaningful supervision beyond next-token prediction.
+
+## Configuration
+
+Edit `src/astromodal/config/defaults.yaml` to customize:
+- File paths and templates
+- Tokenizer parameters
+- Model architecture
+- Training hyperparameters
+
+## Package Structure
+
+```
+astromodal/
+├── config/          # Configuration system
+├── core/            # Shared utilities
+├── tokenizers/      # Scalar, spectrum, image tokenizers
+├── models/          # AutoEncoder, Transformer
+├── datasets/        # PyTorch datasets
+├── training/        # Training infrastructure with reconstruction loss
+└── data/            # Data pipeline
+```
+
+## Key Features
+
+✅ Multi-modal tokenization (images, scalars, spectra)
+✅ Reconstruction-based training (meaningful value prediction)
+✅ YAML configuration system
+✅ Survey integration (S-PLUS, Gaia, DESI, ZTF, VISTA)
+✅ Efficient data loading with caching

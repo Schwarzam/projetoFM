@@ -1,0 +1,55 @@
+{
+  "config": {
+    "mode": "latents",
+    "input_dir": "output_latents",
+    "CODEBOOK_PATH": "codebook_kmeans_2048.joblib",
+    "MAX_FILES": 50,
+    "HOLDOUT_FRACTION": 0.2,
+    "RNG_SEED": 0,
+    "MAX_VECTORS_PER_FILE": 300000,
+    "MAX_VECTORS_TOTAL_PER_SPLIT": 2000000,
+    "PRED_CHUNK": 200000
+  },
+  "train_eval": {
+    "tag": "train_eval",
+    "mode": "latents",
+    "files": 40,
+    "vectors_total": 2000000,
+    "dist": {
+      "n": 2000000,
+      "used_bins": 2048,
+      "used_bins_frac": 1.0,
+      "entropy_nats": 7.422387063579132,
+      "perplexity": 1673.0223557662962,
+      "perplexity_frac": 0.8169054471515118,
+      "top10_mass": 0.016215
+    },
+    "quant_error": {
+      "mse_mean": 0.005333051229937929,
+      "rmse_mean": 0.07276158303736922,
+      "mae_mean": 0.021209085862316075,
+      "vectors_per_sec_mean": 2301603.914579231
+    }
+  },
+  "holdout_eval": {
+    "tag": "holdout_eval",
+    "mode": "latents",
+    "files": 10,
+    "vectors_total": 2000000,
+    "dist": {
+      "n": 2000000,
+      "used_bins": 2048,
+      "used_bins_frac": 1.0,
+      "entropy_nats": 7.424996489586178,
+      "perplexity": 1677.3936846610516,
+      "perplexity_frac": 0.8190398850884041,
+      "top10_mass": 0.01583
+    },
+    "quant_error": {
+      "mse_mean": 0.006039944764607361,
+      "rmse_mean": 0.07738441076957166,
+      "mae_mean": 0.021407620760492057,
+      "vectors_per_sec_mean": 2441668.1410664497
+    }
+  }
+}

@@ -1,34 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Train an AION-like *token* Transformer over:
-  - image tokens (KMeans codebook) keyed by Gaia source_id
-  - scalar tokens (quantile bins) keyed by S-PLUS id
-  - spectrum tokens (ragged CSR flat/indptr) keyed by S-PLUS id
-    * supports GaiaXP BP/RP and DESI b/r/z if present in the NPZ
+Train an AION-like token Transformer, with an auxiliary "meaningful value" loss.
 
-Model:
-  - token embeddings (single global vocab via offsets)
-  - token-type embeddings (modality + group)
-  - positional embeddings
-  - TransformerEncoder with causal mask (autoregressive LM)
-  - loss: next-token prediction with PAD ignored
+Main idea:
+  - Keep CE loss on tokens (discrete LM objective)
+  - Add differentiable reconstruction losses:
+      * image: expected centroid (softmax over image-vocab) vs true centroid
+      * scalar: expected bin center vs true bin center
+      * spectra: expected centroid vs true centroid
+  - To keep it fast, the auxiliary loss samples up to K positions per modality per batch.
 
-✅ Fixes your warnings:
-  - uses torch.amp.autocast / torch.amp.GradScaler (no deprecation)
-  - sets norm_first=False to avoid nested tensor warning
-
-✅ Forces GPU #1:
-  - sets CUDA_VISIBLE_DEVICES=1 before importing torch
+Speed improvements (H100):
+  - TF32 matmul enabled
+  - flash-sdp enabled (where possible)
+  - torch.compile on the model (optional)
+  - cached causal masks
+  - faster startup via index-cache: you scan fields once, then reuse a cached mapping
 
 Run:
-  python3 train_transformer_tokens.py
+  python3 train_transformer_tokens_meaningful.py
 """
 
 from __future__ import annotations
 
 # ---------------------------
-# FORCE GPU #1 (must be before torch import)
+# GPU + perf knobs (must be before torch import)
 # ---------------------------
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -43,6 +40,8 @@ import math
 import time
 import json
 import random
+import joblib
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -62,37 +61,41 @@ from torch.utils.data import Dataset, DataLoader
 # ============================================================
 
 # ---- input templates ----
-FIELDS: List[str] = []  # if empty -> auto-discover from datacube files
+FIELDS: List[str] = []  # if empty -> auto-discover
 
 DATACUBE_TMPL = "/home/astrodados4/downloads/hypercube/datacube_{field}.parquet"
 
-# check if all these paths exist!
-for field in FIELDS:
-    dp = DATACUBE_TMPL.format(field=field)
-    if not Path(dp).exists():
-        FIELDS.remove(field)
+IMAGE_TOKENS_TMPL    = "/home/schwarz/projetoFM/codecs/image_tokens/datacube_{field}_tokens.npz"
+SCALAR_TOKENS_TMPL   = "/home/schwarz/projetoFM/scalar_tokenizers/datacube_{field}_scalar_tokens.npz"
+SPECTRUM_TOKENS_TMPL = "/home/schwarz/projetoFM/spectrum_tokenizers/datacube_{field}_spectrum_tokens.npz"
 
-IMAGE_TOKENS_TMPL   = "/home/schwarz/projetoFM/codecs/image_tokens/datacube_{field}_tokens.npz"
-SCALAR_TOKENS_TMPL  = "/home/schwarz/projetoFM/scalar_tokenizers/datacube_{field}_scalar_tokens.npz"
-SPECTRUM_TOKENS_TMPL= "/home/schwarz/projetoFM/spectrum_tokenizers/datacube_{field}_spectrum_tokens.npz"
-
-# scalar tokenizer config only needed for label decoding (not for training)
 SCALAR_TOKENIZER_CONFIG = "/home/schwarz/projetoFM/scalar_tokenizers/scalar_tokenizer_config.npz"
 
-# ---- row filter (same as you used) ----
+# ---- IMPORTANT: CODEBOOKS / CENTERS for meaningful loss ----
+# These must exist. Adjust paths + key names if needed.
+IMAGE_CODEBOOK_PATH   = "/home/schwarz/projetoFM/codecs/codebook_kmeans_2048.joblib"
+SPECTRA_CODEBOOK_PATH = "/home/schwarz/projetoFM/spectrum_tokenizers/spectrum_tokenizer_config.npz"
+# scalar centers are loaded from SCALAR_TOKENIZER_CONFIG
+
+# Expected keys inside codebook NPZ:
+#  - image: one of ["centroids","codebook","centers"]
+#  - spectra: one of ["centroids","codebook","centers"]
+IMAGE_CODEBOOK_KEY_CANDIDATES   = ("centroids", "codebook", "centers")
+SPECTRA_CODEBOOK_KEY_CANDIDATES = ("centroids", "codebook", "centers")
+SCALAR_CENTERS_KEY_CANDIDATES   = ("bin_centers", "centers", "quantile_centers", "centroids")
+
+# ---- row filter ----
 MAG_MIN = 14.0
 MAG_MAX = 22.0
 MAGERR_MAX = 2.0
 MAG_COL = "mag_pstotal_r"
 MAGERR_COL = "err_mag_pstotal_r"
 
-# ---- token vocab sizes (must match how you generated them) ----
+# ---- token vocab sizes ----
 V_IMAGE   = 2048
-V_SCALAR  = 1024  # N_BINS from scalar config; if different, update here
-V_SPECTRA = 2048  # spectrum groups use KMeans 2048 in your generator
+V_SCALAR  = 1024
+V_SPECTRA = 2048
 
-# ---- spectrum groups we may find in the NPZ (ragged CSR) ----
-# keys are (flat_key, indptr_key) inside the NPZ
 SPECTRUM_GROUPS = {
     "gaiaxp_bp": ("tokens_gaiaxp_bp_flat", "tokens_gaiaxp_bp_indptr"),
     "gaiaxp_rp": ("tokens_gaiaxp_rp_flat", "tokens_gaiaxp_rp_indptr"),
@@ -101,20 +104,21 @@ SPECTRUM_GROUPS = {
     "desi_z":    ("tokens_desi_z_flat",    "tokens_desi_z_indptr"),
 }
 
-# ---- sequence construction ----
-# cap lengths so batches are stable
-MAX_IMAGE_TOKENS  = 24 * 24         # typical
-MAX_SCALAR_TOKENS = 512             # if your scalar_cols > 512, we’ll truncate
-MAX_SPEC_TOKENS_PER_GROUP = 512     # cap ragged per group
-MAX_SEQ_LEN = 2048                  # total cap after concatenation
+# ---- sequence caps ----
+MAX_IMAGE_TOKENS  = 24 * 24
+MAX_SCALAR_TOKENS = 512
+MAX_SPEC_TOKENS_PER_GROUP = 512
+MAX_SEQ_LEN = 2048
 
 # ---- training ----
-OUT_DIR = "runs_tokens_transformer"
+OUT_DIR = "runs_tokens_transformer_meaningful"
 SEED = 0
 
 BATCH_SIZE = 16
 NUM_WORKERS = 4
 PIN_MEMORY = True
+PERSISTENT_WORKERS = True
+PREFETCH_FACTOR = 2
 
 EPOCHS = 5
 LR = 2e-4
@@ -125,11 +129,27 @@ GRAD_ACCUM_STEPS = 1
 LOG_EVERY = 50
 SAVE_EVERY_STEPS = 5000
 
+# model
 D_MODEL  = 768
 N_LAYERS = 12
-N_HEADS  = 12     # 768/12 = 64 per head
-D_FF     = 3072   # 4x
+N_HEADS  = 12
+D_FF     = 3072
 DROPOUT  = 0.1
+
+# ---- meaningful loss knobs ----
+# total_loss = CE + ALPHA_IMG*L_img + ALPHA_SCA*L_sca + ALPHA_SPEC*L_spec
+ALPHA_IMG  = 0.10
+ALPHA_SCA  = 0.10
+ALPHA_SPEC = 0.10
+
+# sample up to K token positions per modality per batch for auxiliary loss (speed!)
+AUX_SAMPLE_K = 4096
+
+# compile for speed (PyTorch 2.x). If it errors, set False.
+USE_TORCH_COMPILE = True
+
+# startup speed: cache dataset index (field,row)
+INDEX_CACHE_PATH = "cache_token_dataset_index.npz"
 
 
 # ============================================================
@@ -161,13 +181,11 @@ def norm_gaia_id(x):
         return None
 
 def discover_fields_from_datacubes(tmpl: str) -> List[str]:
-    # e.g. tmpl ".../datacube_{field}.parquet"
     pat = tmpl.replace("{field}", "*")
     files = sorted(Path(pat).parent.glob(Path(pat).name))
     out = []
     for f in files:
         name = f.name
-        # datacube_<FIELD>.parquet
         if name.startswith("datacube_") and name.endswith(".parquet"):
             out.append(name[len("datacube_"):-len(".parquet")])
     return sorted(out)
@@ -177,6 +195,106 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
 
+def _load_codebook(path: str,
+                   key_candidates: Tuple[str, ...] = ("centroids", "codebook", "centers", "cluster_centers_", "clusters")) -> np.ndarray:
+    """
+    Load a codebook/centroids array from:
+      - .npz  (keys like centroids/codebook/centers)
+      - .joblib / .pkl (sklearn KMeans or dict-like)
+    Returns: np.ndarray float32 with shape (K, D)
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Missing: {path}")
+
+    suffix = p.suffix.lower()
+
+    # ---- NPZ ----
+    if suffix == ".npz":
+        z = np.load(str(p), allow_pickle=True)
+        try:
+            for k in key_candidates:
+                if k in z.files:
+                    arr = np.asarray(z[k])
+                    if arr.ndim != 2:
+                        raise ValueError(f"Key {k} in {path} has shape {arr.shape}, expected (K,D)")
+                    return arr.astype(np.float32)
+            raise KeyError(f"No key in {path} among {key_candidates}. Keys: {z.files}")
+        finally:
+            z.close()
+
+    # ---- JOBLIB ----
+    if suffix == ".joblib":
+        obj = joblib.load(str(p))
+
+        # sklearn KMeans-like
+        if hasattr(obj, "cluster_centers_"):
+            arr = np.asarray(obj.cluster_centers_)
+            if arr.ndim != 2:
+                raise ValueError(f"cluster_centers_ in {path} has shape {arr.shape}, expected (K,D)")
+            return arr.astype(np.float32)
+
+        # dict-like
+        if isinstance(obj, dict):
+            for k in key_candidates:
+                if k in obj:
+                    arr = np.asarray(obj[k])
+                    if arr.ndim != 2:
+                        raise ValueError(f"Key {k} in {path} has shape {arr.shape}, expected (K,D)")
+                    return arr.astype(np.float32)
+
+        raise TypeError(f"Don't know how to extract centroids from joblib object type={type(obj)} in {path}")
+
+    # ---- PKL ----
+    if suffix in (".pkl", ".pickle"):
+        with open(str(p), "rb") as f:
+            obj = pickle.load(f)
+
+        if hasattr(obj, "cluster_centers_"):
+            arr = np.asarray(obj.cluster_centers_)
+            if arr.ndim != 2:
+                raise ValueError(f"cluster_centers_ in {path} has shape {arr.shape}, expected (K,D)")
+            return arr.astype(np.float32)
+
+        if isinstance(obj, dict):
+            for k in key_candidates:
+                if k in obj:
+                    arr = np.asarray(obj[k])
+                    if arr.ndim != 2:
+                        raise ValueError(f"Key {k} in {path} has shape {arr.shape}, expected (K,D)")
+                    return arr.astype(np.float32)
+
+        raise TypeError(f"Don't know how to extract centroids from pickle object type={type(obj)} in {path}")
+
+    raise ValueError(f"Unsupported codebook format: {path} (expected .npz/.joblib/.pkl)")
+
+def _load_npz_key(npz_path: str, key_candidates: Tuple[str, ...]) -> np.ndarray:
+    if not Path(npz_path).exists():
+        raise FileNotFoundError(f"Missing: {npz_path}")
+    z = np.load(npz_path, allow_pickle=True)
+    try:
+        for k in key_candidates:
+            if k in z.files:
+                arr = z[k]
+                return np.asarray(arr)
+    finally:
+        z.close()
+    raise KeyError(f"No key in {npz_path} among {key_candidates}. Keys are: {z.files}")
+
+def _load_scalar_centers(npz_path: str) -> np.ndarray:
+    if not Path(npz_path).exists():
+        raise FileNotFoundError(f"Missing: {npz_path}")
+    z = np.load(npz_path, allow_pickle=True)
+    try:
+        for k in SCALAR_CENTERS_KEY_CANDIDATES:
+            if k in z.files:
+                c = np.asarray(z[k]).astype(np.float32)
+                c = c.reshape(-1)
+                return c
+    finally:
+        z.close()
+    raise KeyError(f"No scalar centers key found in {npz_path}. Tried {SCALAR_CENTERS_KEY_CANDIDATES}.")
+
 
 # ============================================================
 # TOKEN OFFSETS + SPECIAL TOKENS
@@ -184,7 +302,6 @@ def count_parameters(model: nn.Module) -> Tuple[int, int]:
 
 @dataclass(frozen=True)
 class VocabSpec:
-    # global layout: [SPECIAL ...] + [IMAGE] + [SCALAR] + [SPECTRA group 0] + ...
     pad_id: int
     bos_id: int
     eos_id: int
@@ -196,19 +313,11 @@ class VocabSpec:
     vocab_size: int
 
 def build_vocab_spec() -> VocabSpec:
-    # special tokens
-    PAD = 0
-    BOS = 1
-    EOS = 2
-    SEP = 3
-    MISS = 4
+    PAD, BOS, EOS, SEP, MISS = 0, 1, 2, 3, 4
     next_id = 5
 
-    base_image = next_id
-    next_id += V_IMAGE
-
-    base_scalar = next_id
-    next_id += V_SCALAR
+    base_image = next_id; next_id += V_IMAGE
+    base_scalar = next_id; next_id += V_SCALAR
 
     base_spectrum = {}
     for g in SPECTRUM_GROUPS.keys():
@@ -216,36 +325,20 @@ def build_vocab_spec() -> VocabSpec:
         next_id += V_SPECTRA
 
     return VocabSpec(
-        pad_id=PAD,
-        bos_id=BOS,
-        eos_id=EOS,
-        sep_id=SEP,
-        miss_id=MISS,
-        base_image=base_image,
-        base_scalar=base_scalar,
-        base_spectrum=base_spectrum,
+        pad_id=PAD, bos_id=BOS, eos_id=EOS, sep_id=SEP, miss_id=MISS,
+        base_image=base_image, base_scalar=base_scalar, base_spectrum=base_spectrum,
         vocab_size=next_id,
     )
 
 
 # ============================================================
-# FIELD INDEXER (maps ids -> row indices, loads arrays once)
+# FIELD INDEXER
 # ============================================================
 
 class FieldIndex:
-    """
-    Loads:
-      - image npz: ids=Gaia source_id, tokens_flat
-      - scalar npz: ids=SPLUS id, scalar_tokens (N, n_cols)
-      - spectrum npz: ids=SPLUS id, ragged groups (flat+indptr)
-    Builds dict maps from id->row index so we can fetch quickly.
-    """
-
-    def __init__(self, field: str, vocab: VocabSpec):
+    def __init__(self, field: str):
         self.field = field
-        self.vocab = vocab
-
-        self.df = None  # filtered dataframe (metadata subset)
+        self.df = None
 
         # image
         self.img_tokens_flat: Optional[np.ndarray] = None
@@ -253,26 +346,20 @@ class FieldIndex:
 
         # scalar
         self.scalar_tokens: Optional[np.ndarray] = None
-        self.scalar_cols: Optional[np.ndarray] = None
         self.splus_id_to_scalar_row: Dict[str, int] = {}
 
-        # spectrum
+        # spectrum (keep open in main process; if workers break, set NUM_WORKERS=0)
+        self.spec_npz: Optional[np.lib.npyio.NpzFile] = None
         self.splus_id_to_spec_row: Dict[str, int] = {}
-        self.spec_npz: Optional[np.lib.npyio.NpzFile] = None  # keep open
-        self.spec_ids: Optional[np.ndarray] = None
-
-        # available spectrum groups in this field
         self.spec_groups_present: Dict[str, Tuple[str, str]] = {}
 
         self._load()
 
     def _load(self):
-        # ---- read & filter datacube ----
         df = pd.read_parquet(
             DATACUBE_TMPL.format(field=self.field),
             columns=["id", "ra", "dec", "gaia_source_id", MAG_COL, MAGERR_COL],
         )
-
         mask = (
             (df[MAG_COL] > MAG_MIN) & (df[MAG_COL] < MAG_MAX) &
             (df[MAGERR_COL] < MAGERR_MAX)
@@ -282,46 +369,43 @@ class FieldIndex:
         df["gaia_source_id"] = df["gaia_source_id"].map(norm_gaia_id)
         self.df = df
 
-        # ---- image ----
-        img_path = IMAGE_TOKENS_TMPL.format(field=self.field)
-        if Path(img_path).exists():
-            img = np.load(img_path, allow_pickle=True)
-            if ("ids" in img.files) and ("tokens_flat" in img.files):
-                ids = np.asarray(img["ids"], dtype=object)
-                ids = [norm_gaia_id(x) for x in ids]
-                toks = img["tokens_flat"]
-                self.img_tokens_flat = toks
-                self.img_id_to_row = {gid: i for i, gid in enumerate(ids) if gid is not None}
-            img.close()
+        # image
+        ip = IMAGE_TOKENS_TMPL.format(field=self.field)
+        if Path(ip).exists():
+            z = np.load(ip, allow_pickle=True)
+            try:
+                if "ids" in z.files and "tokens_flat" in z.files:
+                    ids = [norm_gaia_id(x) for x in np.asarray(z["ids"], dtype=object)]
+                    self.img_tokens_flat = z["tokens_flat"]
+                    self.img_id_to_row = {gid: i for i, gid in enumerate(ids) if gid is not None}
+            finally:
+                z.close()
 
-        # ---- scalar ----
-        sca_path = SCALAR_TOKENS_TMPL.format(field=self.field)
-        if Path(sca_path).exists():
-            sca = np.load(sca_path, allow_pickle=True)
-            if ("ids" in sca.files) and ("scalar_tokens" in sca.files) and ("scalar_cols" in sca.files):
-                sids = np.asarray(sca["ids"], dtype=object)
-                sids = [norm_splus_id(x) for x in sids]
-                self.scalar_tokens = sca["scalar_tokens"]
-                self.scalar_cols = np.asarray(sca["scalar_cols"], dtype=object)
-                self.splus_id_to_scalar_row = {sid: i for i, sid in enumerate(sids) if sid}
-            sca.close()
+        # scalar
+        sp = SCALAR_TOKENS_TMPL.format(field=self.field)
+        if Path(sp).exists():
+            z = np.load(sp, allow_pickle=True)
+            try:
+                if "ids" in z.files and "scalar_tokens" in z.files:
+                    ids = [norm_splus_id(x) for x in np.asarray(z["ids"], dtype=object)]
+                    self.scalar_tokens = z["scalar_tokens"]
+                    self.splus_id_to_scalar_row = {sid: i for i, sid in enumerate(ids) if sid}
+            finally:
+                z.close()
 
-        # ---- spectrum ----
-        spe_path = SPECTRUM_TOKENS_TMPL.format(field=self.field)
-        if Path(spe_path).exists():
-            spe = np.load(spe_path, allow_pickle=True)
-            if "ids" in spe.files:
-                sids = np.asarray(spe["ids"], dtype=object)
-                sids = [norm_splus_id(x) for x in sids]
-                self.spec_ids = np.array(sids, dtype=object)
-                self.splus_id_to_spec_row = {sid: i for i, sid in enumerate(sids) if sid}
-                self.spec_npz = spe  # keep open for flat/indptr slicing
-
-                for g, (flat_k, ind_k) in SPECTRUM_GROUPS.items():
-                    if flat_k in spe.files and ind_k in spe.files:
-                        self.spec_groups_present[g] = (flat_k, ind_k)
+        # spectrum
+        xp = SPECTRUM_TOKENS_TMPL.format(field=self.field)
+        if Path(xp).exists():
+            z = np.load(xp, allow_pickle=True)
+            if "ids" in z.files:
+                ids = [norm_splus_id(x) for x in np.asarray(z["ids"], dtype=object)]
+                self.splus_id_to_spec_row = {sid: i for i, sid in enumerate(ids) if sid}
+                for g, (fk, ik) in SPECTRUM_GROUPS.items():
+                    if fk in z.files and ik in z.files:
+                        self.spec_groups_present[g] = (fk, ik)
+                self.spec_npz = z
             else:
-                spe.close()
+                z.close()
 
     def __del__(self):
         try:
@@ -330,82 +414,59 @@ class FieldIndex:
         except Exception:
             pass
 
-    def __len__(self) -> int:
+    def __len__(self):
         return int(len(self.df)) if self.df is not None else 0
 
     def get_row(self, idx: int) -> Dict[str, Any]:
-        """Return one sample (metadata + tokens)."""
         r = self.df.iloc[idx]
         sid: str = r["id"]
         gid: Optional[int] = r["gaia_source_id"]
 
-        # image tokens (gaia keyed)
         img_tokens = None
         if gid is not None and self.img_tokens_flat is not None:
-            j = self.img_id_to_row.get(gid, None)
+            j = self.img_id_to_row.get(gid)
             if j is not None:
                 img_tokens = self.img_tokens_flat[j]
 
-        # scalar tokens (splus keyed)
         scalar_tokens = None
         if self.scalar_tokens is not None:
-            j = self.splus_id_to_scalar_row.get(sid, None)
+            j = self.splus_id_to_scalar_row.get(sid)
             if j is not None:
                 scalar_tokens = self.scalar_tokens[j]
 
-        # spectrum tokens (ragged, splus keyed)
         spec = {}
         if self.spec_npz is not None:
-            j = self.splus_id_to_spec_row.get(sid, None)
+            j = self.splus_id_to_spec_row.get(sid)
             if j is not None:
-                for g, (flat_k, ind_k) in self.spec_groups_present.items():
-                    flat = self.spec_npz[flat_k]
-                    indp = self.spec_npz[ind_k]
-                    a = int(indp[j])
-                    b = int(indp[j + 1])
+                for g, (fk, ik) in self.spec_groups_present.items():
+                    flat = self.spec_npz[fk]
+                    indp = self.spec_npz[ik]
+                    a = int(indp[j]); b = int(indp[j + 1])
                     spec[g] = flat[a:b]
+
         return {
-            "meta": {
-                "field": self.field,
-                "id": sid,
-                "gaia_source_id": gid,
-                "ra": float(r["ra"]),
-                "dec": float(r["dec"]),
-                MAG_COL: float(r[MAG_COL]),
-                MAGERR_COL: float(r[MAGERR_COL]),
-            },
             "image_tokens": img_tokens,
             "scalar_tokens": scalar_tokens,
-            "spectrum_tokens": spec,  # dict[group]->1d tokens
+            "spectrum_tokens": spec,
         }
 
 
 # ============================================================
-# SEQUENCE BUILDER (handles missing data + masks)
+# SEQUENCE BUILDER
 # ============================================================
 
-# token types (small set)
-TT_BOS    = 0
-TT_IMAGE  = 1
+TT_BOS = 0
+TT_IMAGE = 1
 TT_SCALAR = 2
-TT_SPEC_BASE = 10  # spec groups get TT_SPEC_BASE + index
+TT_SPEC_BASE = 10
 
 def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Returns:
-      token_ids: int64 [L]
-      type_ids:  int64 [L]
-    Autoregressive: we will predict next token.
-    Missing modalities:
-      - insert [MISS] with appropriate type_id
-    """
-
     toks: List[int] = [vocab.bos_id]
     ttypes: List[int] = [TT_BOS]
 
-    # --- image ---
+    # image
+    toks.append(vocab.sep_id); ttypes.append(TT_BOS)
     img = sample["image_tokens"]
-    toks.append(vocab.sep_id); ttypes.append(TT_BOS)  # separator
     if img is None:
         toks.append(vocab.miss_id); ttypes.append(TT_IMAGE)
     else:
@@ -413,9 +474,9 @@ def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray
         toks.extend((vocab.base_image + arr).tolist())
         ttypes.extend([TT_IMAGE] * arr.size)
 
-    # --- scalar ---
-    sca = sample["scalar_tokens"]
+    # scalar
     toks.append(vocab.sep_id); ttypes.append(TT_BOS)
+    sca = sample["scalar_tokens"]
     if sca is None:
         toks.append(vocab.miss_id); ttypes.append(TT_SCALAR)
     else:
@@ -424,14 +485,11 @@ def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray
         toks.extend((vocab.base_scalar + arr).tolist())
         ttypes.extend([TT_SCALAR] * arr.size)
 
-    # --- spectrum groups ---
+    # spectrum groups
     spec: Dict[str, np.ndarray] = sample["spectrum_tokens"] or {}
-    # fixed order so type_ids are stable
-    spec_group_list = list(SPECTRUM_GROUPS.keys())
-    for gi, g in enumerate(spec_group_list):
+    for gi, g in enumerate(SPECTRUM_GROUPS.keys()):
         tt = TT_SPEC_BASE + gi
         toks.append(vocab.sep_id); ttypes.append(TT_BOS)
-
         seq = spec.get(g, None)
         if seq is None or len(seq) == 0:
             toks.append(vocab.miss_id); ttypes.append(tt)
@@ -443,58 +501,122 @@ def build_sequence(sample: Dict[str, Any], vocab: VocabSpec) -> Tuple[np.ndarray
 
     toks.append(vocab.eos_id); ttypes.append(TT_BOS)
 
-    # global cap
     if len(toks) > MAX_SEQ_LEN:
         toks = toks[:MAX_SEQ_LEN]
         ttypes = ttypes[:MAX_SEQ_LEN]
 
-    return np.asarray(toks, dtype=np.int64), np.asarray(ttypes, dtype=np.int64)
+    return np.asarray(toks, np.int64), np.asarray(ttypes, np.int64)
 
 
 # ============================================================
-# DATASET (multi-field)
+# DATASET with index-cache (fixes "takes forever to start")
 # ============================================================
 
 class MultiFieldTokenDataset(Dataset):
-    def __init__(self, fields: List[str], vocab: VocabSpec):
+    """
+    Startup issue before: you were loading ALL FieldIndex objects for 2444 fields upfront.
+    Now:
+      - We build (or load) an index list of (field, row) once.
+      - We lazily instantiate FieldIndex per field on first access and keep a small LRU cache.
+    """
+
+    def __init__(self, fields: List[str], vocab: VocabSpec, index_cache: str = INDEX_CACHE_PATH, lru_fields: int = 8):
         self.vocab = vocab
-        self.field_indexes: List[FieldIndex] = []
-        self.global_map: List[Tuple[int, int]] = []  # (field_i, row_i)
+        self.fields = fields
+        self.index_cache = index_cache
+        self.lru_fields = lru_fields
 
-        for f in fields:
-            fi = FieldIndex(f, vocab=vocab)
-            n = len(fi)
-            if n == 0:
+        self.index_field: List[str] = []
+        self.index_row: np.ndarray = np.empty((0,), dtype=np.int32)
+
+        self._field_cache: Dict[str, FieldIndex] = {}
+        self._field_cache_order: List[str] = []
+
+        self._load_or_build_index()
+
+    def _load_or_build_index(self):
+        p = Path(self.index_cache)
+        if p.exists():
+            z = np.load(str(p), allow_pickle=True)
+            self.index_field = list(z["field"].astype(str))
+            self.index_row = z["row"].astype(np.int32)
+            print(f"[index] loaded {len(self.index_row)} samples from {p}")
+            return
+
+        print("[index] building index (first time; will be cached)...")
+        t0 = time.time()
+        fields_out = []
+        rows_out = []
+
+        for f in tqdm(self.fields, desc="[index-scan]", dynamic_ncols=True):
+            dp = DATACUBE_TMPL.format(field=f)
+            if not Path(dp).exists():
                 continue
-            self.field_indexes.append(fi)
-            field_i = len(self.field_indexes) - 1
-            self.global_map.extend([(field_i, i) for i in range(n)])
+            # read just the needed columns to filter
+            df = pd.read_parquet(dp, columns=[MAG_COL, MAGERR_COL])
+            mask = ((df[MAG_COL] > MAG_MIN) & (df[MAG_COL] < MAG_MAX) & (df[MAGERR_COL] < MAGERR_MAX)).values
+            idxs = np.nonzero(mask)[0]
+            if idxs.size == 0:
+                continue
+            fields_out.extend([f] * int(idxs.size))
+            rows_out.append(idxs.astype(np.int32))
 
-        random.shuffle(self.global_map)
-        print(f"[data] samples = {len(self.global_map)}")
+        if rows_out:
+            row_all = np.concatenate(rows_out, axis=0)
+        else:
+            row_all = np.empty((0,), dtype=np.int32)
 
-    def __len__(self) -> int:
-        return len(self.global_map)
+        self.index_field = fields_out
+        self.index_row = row_all
+
+        # shuffle once here (and DataLoader shuffle=True can stay off if you want)
+        perm = np.random.permutation(len(self.index_row))
+        self.index_row = self.index_row[perm]
+        self.index_field = [self.index_field[i] for i in perm.tolist()]
+
+        np.savez_compressed(str(p), field=np.array(self.index_field, dtype=object), row=self.index_row)
+        print(f"[index] built {len(self.index_row)} samples in {(time.time()-t0)/60:.1f} min; cached to {p}")
+
+    def __len__(self):
+        return int(len(self.index_row))
+
+    def _get_field_index(self, field: str) -> FieldIndex:
+        if field in self._field_cache:
+            # refresh LRU
+            if field in self._field_cache_order:
+                self._field_cache_order.remove(field)
+            self._field_cache_order.append(field)
+            return self._field_cache[field]
+
+        fi = FieldIndex(field)
+        self._field_cache[field] = fi
+        self._field_cache_order.append(field)
+
+        # evict LRU if needed
+        while len(self._field_cache_order) > self.lru_fields:
+            old = self._field_cache_order.pop(0)
+            try:
+                del self._field_cache[old]
+            except Exception:
+                pass
+
+        return fi
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        fi, ri = self.global_map[idx]
-        sample = self.field_indexes[fi].get_row(ri)
+        field = self.index_field[idx]
+        row_i = int(self.index_row[idx])
+        fi = self._get_field_index(field)
+        sample = fi.get_row(row_i)
         token_ids, type_ids = build_sequence(sample, self.vocab)
-        return {
-            "token_ids": token_ids,
-            "type_ids": type_ids,
-        }
+        return {"token_ids": token_ids, "type_ids": type_ids}
 
 
 def collate_batch(batch: List[Dict[str, Any]], pad_id: int):
-    lens = [len(x["token_ids"]) for x in batch]
-    max_len = max(lens)
-
+    max_len = max(len(x["token_ids"]) for x in batch)
     B = len(batch)
     tokens = torch.full((B, max_len), pad_id, dtype=torch.long)
     types  = torch.zeros((B, max_len), dtype=torch.long)
-    attn_mask = torch.zeros((B, max_len), dtype=torch.bool)  # True for real tokens
-
+    attn_mask = torch.zeros((B, max_len), dtype=torch.bool)
     for i, ex in enumerate(batch):
         t = torch.from_numpy(ex["token_ids"])
         y = torch.from_numpy(ex["type_ids"])
@@ -502,24 +624,18 @@ def collate_batch(batch: List[Dict[str, Any]], pad_id: int):
         tokens[i, :L] = t
         types[i, :L] = y
         attn_mask[i, :L] = True
-
-    return {
-        "tokens": tokens,
-        "types": types,
-        "attn_mask": attn_mask,
-    }
+    return {"tokens": tokens, "types": types, "attn_mask": attn_mask}
 
 
 # ============================================================
-# MODEL
+# MODEL (cached causal mask + optional compile)
 # ============================================================
 
 class CausalTransformerLM(nn.Module):
-    def __init__(self, vocab_size: int, n_types: int, d_model: int, n_layers: int, n_heads: int, d_ff: int, dropout: float, max_len: int):
+    def __init__(self, vocab_size: int, n_types: int, d_model: int, n_layers: int, n_heads: int,
+                 d_ff: int, dropout: float, max_len: int):
         super().__init__()
         self.vocab_size = vocab_size
-        self.n_types = n_types
-        self.d_model = d_model
         self.max_len = max_len
 
         self.tok_emb = nn.Embedding(vocab_size, d_model)
@@ -533,39 +649,138 @@ class CausalTransformerLM(nn.Module):
             dropout=dropout,
             batch_first=True,
             activation="gelu",
-            norm_first=False,  # ✅ avoids nested tensor warning you saw
+            norm_first=False,
         )
         self.enc = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
         self.ln = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
-
         self.drop = nn.Dropout(dropout)
 
+        self._mask_cache: Dict[int, torch.Tensor] = {}
+
+    def _causal_mask(self, L: int, device: torch.device) -> torch.Tensor:
+        m = self._mask_cache.get(L, None)
+        if m is None or m.device != device:
+            m = torch.triu(torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1)
+            self._mask_cache[L] = m
+        return m
+
     def forward(self, tokens: torch.Tensor, types: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        """
-        tokens: (B, L)
-        types: (B, L)
-        attn_mask: (B, L) bool, True where token is real (not pad)
-        """
         B, L = tokens.shape
         if L > self.max_len:
-            raise ValueError(f"Sequence length {L} > max_len {self.max_len}. Increase MAX_SEQ_LEN / model max_len.")
+            raise ValueError(f"Sequence length {L} > max_len {self.max_len}")
 
         pos = torch.arange(L, device=tokens.device).unsqueeze(0).expand(B, L)
-
         x = self.tok_emb(tokens) + self.type_emb(types) + self.pos_emb(pos)
         x = self.drop(x)
 
-        # key padding mask: True where we should MASK (i.e. pad)
-        key_padding_mask = ~attn_mask  # (B, L)
-
-        # causal mask: True where future positions are masked
-        causal_mask = torch.triu(torch.ones(L, L, device=tokens.device, dtype=torch.bool), diagonal=1)
+        key_padding_mask = ~attn_mask
+        causal_mask = self._causal_mask(L, tokens.device)
 
         h = self.enc(x, mask=causal_mask, src_key_padding_mask=key_padding_mask)
         h = self.ln(h)
-        logits = self.head(h)  # (B, L, V)
-        return logits
+        return self.head(h)
+
+
+# ============================================================
+# LOSS: CE + meaningful auxiliary losses
+# ============================================================
+
+def _sample_positions(mask: torch.Tensor, k: int) -> torch.Tensor:
+    """
+    mask: (B, L) bool
+    returns indices into flattened (B*L,) positions
+    """
+    idx = torch.nonzero(mask.reshape(-1), as_tuple=False).reshape(-1)
+    if idx.numel() == 0:
+        return idx
+    if idx.numel() <= k:
+        return idx
+    # uniform sample without replacement
+    perm = torch.randperm(idx.numel(), device=idx.device)[:k]
+    return idx[perm]
+
+def meaningful_aux_losses(
+    logits: torch.Tensor,  # (B, L, V)
+    y: torch.Tensor,       # (B, L)
+    vocab: VocabSpec,
+    img_codebook: torch.Tensor,     # (V_IMAGE, Dimg)
+    spec_codebook: torch.Tensor,    # (V_SPECTRA, Dspec)
+    scalar_centers: torch.Tensor,   # (V_SCALAR,)
+    aux_k: int,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    Differentiable expected-centroid reconstruction losses.
+    We only compute on a sampled subset of positions per modality for speed.
+    """
+
+    stats = {"aux_img": 0.0, "aux_sca": 0.0, "aux_spec": 0.0}
+    device = logits.device
+    B, L, V = logits.shape
+
+    # ignore PAD/MISS/special in aux losses
+    specials = torch.tensor([vocab.pad_id, vocab.bos_id, vocab.eos_id, vocab.sep_id, vocab.miss_id],
+                            device=device, dtype=torch.long)
+    is_special = (y[..., None] == specials[None, None, :]).any(dim=-1)
+
+    # ---- IMAGE positions ----
+    img_lo = vocab.base_image
+    img_hi = vocab.base_image + V_IMAGE
+    mask_img = (~is_special) & (y >= img_lo) & (y < img_hi)
+    idx_img = _sample_positions(mask_img, aux_k)
+    loss_img = torch.tensor(0.0, device=device)
+
+    if idx_img.numel() > 0:
+        y_flat = y.reshape(-1)[idx_img]
+        # logits restricted to image vocab
+        logits_img = logits.reshape(-1, V)[:, img_lo:img_hi][idx_img]  # (N, V_IMAGE)
+        probs = torch.softmax(logits_img.float(), dim=-1).to(img_codebook.dtype)  # (N, V_IMAGE)
+        pred = probs @ img_codebook  # (N, Dimg)
+        true = img_codebook[(y_flat - img_lo).clamp(0, V_IMAGE - 1)]
+        loss_img = F.mse_loss(pred, true)
+        stats["aux_img"] = float(loss_img.detach().cpu().item())
+
+    # ---- SCALAR positions ----
+    sc_lo = vocab.base_scalar
+    sc_hi = vocab.base_scalar + V_SCALAR
+    mask_sca = (~is_special) & (y >= sc_lo) & (y < sc_hi)
+    idx_sca = _sample_positions(mask_sca, aux_k)
+    loss_sca = torch.tensor(0.0, device=device)
+
+    if idx_sca.numel() > 0:
+        y_flat = y.reshape(-1)[idx_sca]
+        logits_sca = logits.reshape(-1, V)[:, sc_lo:sc_hi][idx_sca]  # (N, V_SCALAR)
+        probs = torch.softmax(logits_sca.float(), dim=-1).to(scalar_centers.dtype)  # (N, V_SCALAR)
+        pred = (probs * scalar_centers.unsqueeze(0)).sum(dim=-1)  # (N,)
+        true = scalar_centers[(y_flat - sc_lo).clamp(0, V_SCALAR - 1)]
+        loss_sca = F.mse_loss(pred, true)
+        stats["aux_sca"] = float(loss_sca.detach().cpu().item())
+
+    # ---- SPECTRA positions (all spectrum groups share V_SPECTRA; offsets differ) ----
+    loss_spec_total = torch.tensor(0.0, device=device)
+    n_used = 0
+    for g, base in vocab.base_spectrum.items():
+        sp_lo = base
+        sp_hi = base + V_SPECTRA
+        mask_sp = (~is_special) & (y >= sp_lo) & (y < sp_hi)
+        idx_sp = _sample_positions(mask_sp, max(1, aux_k // max(1, len(vocab.base_spectrum))))
+        if idx_sp.numel() == 0:
+            continue
+
+        y_flat = y.reshape(-1)[idx_sp]
+        logits_sp = logits.reshape(-1, V)[:, sp_lo:sp_hi][idx_sp]  # (N, V_SPECTRA)
+        probs = torch.softmax(logits_sp.float(), dim=-1).to(spec_codebook.dtype)
+        pred = probs @ spec_codebook
+        true = spec_codebook[(y_flat - sp_lo).clamp(0, V_SPECTRA - 1)]
+        loss_g = F.mse_loss(pred, true)
+        loss_spec_total = loss_spec_total + loss_g
+        n_used += 1
+
+    if n_used > 0:
+        loss_spec_total = loss_spec_total / n_used
+        stats["aux_spec"] = float(loss_spec_total.detach().cpu().item())
+
+    return loss_img, loss_sca, loss_spec_total, stats
 
 
 # ============================================================
@@ -575,9 +790,8 @@ class CausalTransformerLM(nn.Module):
 def lr_schedule(step: int, base_lr: float, warmup: int) -> float:
     if step < warmup:
         return base_lr * (step + 1) / max(1, warmup)
-    # cosine decay to 10% of LR
     t = step - warmup
-    T = 200_000  # you can tune; just needs to be "large"
+    T = 200_000
     frac = min(1.0, t / max(1, T))
     cos = 0.5 * (1 + math.cos(math.pi * frac))
     return base_lr * (0.1 + 0.9 * cos)
@@ -586,16 +800,41 @@ def train():
     set_seed(SEED)
     ensure_dir(OUT_DIR)
 
+    # perf knobs for H100
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+    except Exception:
+        pass
+
     vocab = build_vocab_spec()
-    n_types = TT_SPEC_BASE + len(SPECTRUM_GROUPS) + 5  # small safety margin
+    n_types = TT_SPEC_BASE + len(SPECTRUM_GROUPS) + 5
 
     # fields
     fields = FIELDS or discover_fields_from_datacubes(DATACUBE_TMPL)
     if not fields:
         raise RuntimeError("No fields found. Set FIELDS or fix DATACUBE_TMPL.")
-    print(f"[data] using {len(fields)} fields")
+    print(f"[data] fields={len(fields)}")
 
-    ds = MultiFieldTokenDataset(fields, vocab=vocab)
+    # load codebooks / centers (CPU -> move to GPU once)
+    img_cb_np  = _load_codebook(IMAGE_CODEBOOK_PATH)
+    spec_cb_np = _load_npz_key(SPECTRA_CODEBOOK_PATH, SPECTRA_CODEBOOK_KEY_CANDIDATES).astype(np.float32)
+    sc_cent_np = _load_scalar_centers(SCALAR_TOKENIZER_CONFIG).astype(np.float32)
+
+    if img_cb_np.shape[0] != V_IMAGE:
+        raise ValueError(f"IMAGE codebook first dim {img_cb_np.shape[0]} != V_IMAGE={V_IMAGE}")
+    if spec_cb_np.shape[0] != V_SPECTRA:
+        raise ValueError(f"SPECTRA codebook first dim {spec_cb_np.shape[0]} != V_SPECTRA={V_SPECTRA}")
+    if sc_cent_np.shape[0] != V_SCALAR:
+        raise ValueError(f"SCALAR centers dim {sc_cent_np.shape[0]} != V_SCALAR={V_SCALAR}")
+
+    ds = MultiFieldTokenDataset(fields, vocab=vocab, index_cache=INDEX_CACHE_PATH, lru_fields=8)
 
     dl = DataLoader(
         ds,
@@ -603,12 +842,14 @@ def train():
         shuffle=True,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
+        persistent_workers=(PERSISTENT_WORKERS and NUM_WORKERS > 0),
+        prefetch_factor=PREFETCH_FACTOR if NUM_WORKERS > 0 else None,
         collate_fn=lambda b: collate_batch(b, pad_id=vocab.pad_id),
         drop_last=True,
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[env] device={device} visible_cuda_devices={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+    print(f"[env] device={device} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
     model = CausalTransformerLM(
         vocab_size=vocab.vocab_size,
@@ -621,6 +862,13 @@ def train():
         max_len=MAX_SEQ_LEN,
     ).to(device)
 
+    if USE_TORCH_COMPILE and device == "cuda":
+        try:
+            model = torch.compile(model, mode="max-autotune")
+            print("[perf] torch.compile enabled")
+        except Exception as e:
+            print(f"[perf] torch.compile failed, continuing without it: {e}")
+
     total_p, train_p = count_parameters(model)
     print(f"[model] d_model={D_MODEL} layers={N_LAYERS} heads={N_HEADS} ff={D_FF}")
     print(f"[model] vocab_size={vocab.vocab_size} n_types={n_types} max_len={MAX_SEQ_LEN}")
@@ -628,7 +876,12 @@ def train():
 
     opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95))
     use_amp = (device == "cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)  # ✅ no deprecation
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    # move codebooks to GPU once
+    img_codebook = torch.from_numpy(img_cb_np).to(device=device, dtype=torch.float16 if use_amp else torch.float32)
+    spec_codebook = torch.from_numpy(spec_cb_np).to(device=device, dtype=torch.float16 if use_amp else torch.float32)
+    scalar_centers = torch.from_numpy(sc_cent_np).to(device=device, dtype=torch.float16 if use_amp else torch.float32)
 
     global_step = 0
     model.train()
@@ -636,31 +889,45 @@ def train():
     for epoch in range(1, EPOCHS + 1):
         pbar = tqdm(dl, desc=f"epoch {epoch}/{EPOCHS}", dynamic_ncols=True)
         for it, batch in enumerate(pbar):
-            # move
             tokens = batch["tokens"].to(device, non_blocking=True)
-            types = batch["types"].to(device, non_blocking=True)
+            types  = batch["types"].to(device, non_blocking=True)
             attn_mask = batch["attn_mask"].to(device, non_blocking=True)
 
-            # LM objective: predict next token
+            # next-token setup
             x = tokens[:, :-1]
             x_types = types[:, :-1]
             x_mask = attn_mask[:, :-1]
-
             y = tokens[:, 1:].contiguous()
 
             lr_now = lr_schedule(global_step, LR, WARMUP_STEPS)
             for pg in opt.param_groups:
                 pg["lr"] = lr_now
 
-            with torch.amp.autocast("cuda", enabled=use_amp):  # ✅ no deprecation
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 logits = model(x, x_types, x_mask)  # (B, L-1, V)
-                loss = F.cross_entropy(
+
+                # CE (discrete)
+                loss_ce = F.cross_entropy(
                     logits.reshape(-1, logits.size(-1)),
                     y.reshape(-1),
                     ignore_index=vocab.pad_id,
                 )
 
+                # meaningful auxiliary losses (differentiable expected centroid / expected center)
+                loss_img, loss_sca, loss_spec, aux_stats = meaningful_aux_losses(
+                    logits=logits,
+                    y=y,
+                    vocab=vocab,
+                    img_codebook=img_codebook,
+                    spec_codebook=spec_codebook,
+                    scalar_centers=scalar_centers,
+                    aux_k=AUX_SAMPLE_K,
+                )
+
+                loss = loss_ce + (ALPHA_IMG * loss_img) + (ALPHA_SCA * loss_sca) + (ALPHA_SPEC * loss_spec)
+
             loss_val = float(loss.detach().cpu().item())
+            ce_val   = float(loss_ce.detach().cpu().item())
 
             scaler.scale(loss / GRAD_ACCUM_STEPS).backward()
 
@@ -676,7 +943,14 @@ def train():
                 global_step += 1
 
                 if global_step % LOG_EVERY == 0:
-                    pbar.set_postfix({"loss": f"{loss_val:.3f}", "lr": f"{lr_now:.2e}"})
+                    pbar.set_postfix({
+                        "loss": f"{loss_val:.3f}",
+                        "ce": f"{ce_val:.3f}",
+                        "aux_img": f"{aux_stats['aux_img']:.3f}",
+                        "aux_sca": f"{aux_stats['aux_sca']:.3f}",
+                        "aux_spec": f"{aux_stats['aux_spec']:.3f}",
+                        "lr": f"{lr_now:.2e}",
+                    })
 
                 if global_step % SAVE_EVERY_STEPS == 0:
                     ckpt = {
@@ -697,13 +971,18 @@ def train():
                                 "base_scalar": vocab.base_scalar,
                                 "base_spectrum": vocab.base_spectrum,
                             },
+                            "loss": {
+                                "ALPHA_IMG": ALPHA_IMG,
+                                "ALPHA_SCA": ALPHA_SCA,
+                                "ALPHA_SPEC": ALPHA_SPEC,
+                                "AUX_SAMPLE_K": AUX_SAMPLE_K,
+                            }
                         },
                     }
                     outp = Path(OUT_DIR) / f"ckpt_step_{global_step:08d}.pt"
                     torch.save(ckpt, outp)
                     tqdm.write(f"[save] {outp}")
 
-        # epoch end save
         outp = Path(OUT_DIR) / f"ckpt_epoch_{epoch:03d}.pt"
         torch.save({"model": model.state_dict(), "epoch": epoch, "global_step": global_step}, outp)
         tqdm.write(f"[save] {outp}")
