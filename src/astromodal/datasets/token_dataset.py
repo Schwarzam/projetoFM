@@ -538,14 +538,12 @@ class MultiFieldTokenDataset(Dataset):
         # Add scalar tokens if available
         if sample["scalar_tokens"] is not None and sample["scalar_cols"] is not None:
             scal_toks = sample["scalar_tokens"]  # (n_cols,) array of token values
-            n_bins = sample["scalar_n_bins"]
 
-            # Shift each token by: base_scalar + (col_idx * n_bins) + token_value
+            # Scalar tokens are already in range [0, vocab.scalar_size-1]
+            # Just shift by base offset
             scal_toks_shifted = []
-            for col_idx, tok_val in enumerate(scal_toks):
-                if col_idx >= 512:  # Max 512 columns
-                    break
-                shifted = self.vocab.base_scalar + (col_idx * n_bins) + int(tok_val)
+            for tok_val in scal_toks[:512]:  # Max 512 columns
+                shifted = self.vocab.base_scalar + int(tok_val)
                 scal_toks_shifted.append(shifted)
 
             token_ids.extend(scal_toks_shifted)

@@ -40,6 +40,7 @@ Examples
 
 from .autoencoder import AutoEncoder, ResBlock, Encoder, Decoder
 from .transformer import CausalTransformerLM
+from .aion_transformer import AIONTransformer, count_parameters
 
 __all__ = [
     "AutoEncoder",
@@ -47,4 +48,6 @@ __all__ = [
     "Encoder",
     "Decoder",
     "CausalTransformerLM",
+    "AIONTransformer",
+    "count_parameters",
 ]

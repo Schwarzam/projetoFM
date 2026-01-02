@@ -7,10 +7,12 @@ multi-modal astronomical data including images, scalars, and spectra.
 
 from .token_dataset import FieldIndex, MultiFieldTokenDataset, collate_sequences
 from .image_dataset import SplusDataset
+from .cached_dataset import CachedTokenDataset
 
 __all__ = [
     "FieldIndex",
     "MultiFieldTokenDataset",
     "SplusDataset",
     "collate_sequences",
+    "CachedTokenDataset",
 ]
