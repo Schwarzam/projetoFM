@@ -74,9 +74,9 @@ D_FF = 3072
 DROPOUT = 0.1
 MAX_SEQ_LEN = 2048
 
-# Masking strategy - Reduced for faster training
-INPUT_BUDGET = 128  # Reduced from 256 - faster processing
-OUTPUT_BUDGET = 64   # Reduced from 128 - faster processing
+# Masking strategy - Increased for better learning
+INPUT_BUDGET = 256  # Increased - model needs more context to learn
+OUTPUT_BUDGET = 128  # Increased - predict more tokens per step
 BETA_ALPHA = 0.5
 BETA_BETA = 1.0
 
@@ -85,7 +85,7 @@ OUT_DIR = "runs_aion_h100"
 SEED = 42
 BATCH_SIZE = 256  # H100 can handle MUCH larger batches - maximize throughput
 GRAD_ACCUM_STEPS = 1  # Accumulate gradients for effective batch size of 64
-NUM_WORKERS = 16  # More workers for data loading (increase if still bottlenecked)
+NUM_WORKERS = 4  # Reduced: fewer workers = better LRU cache hit rate per worker
 PIN_MEMORY = True
 PERSISTENT_WORKERS = True
 PREFETCH_FACTOR = 8  # More prefetching to keep GPU fed
@@ -94,7 +94,7 @@ PREFETCH_FACTOR = 8  # More prefetching to keep GPU fed
 MAX_STEPS = 100_000  # Stop after 100k steps instead of full epochs
 EPOCHS = 1  # Just 1 epoch (will stop at MAX_STEPS anyway)
 
-LR = 2e-4
+LR = 5e-5  # Reduced from 2e-4 - more stable for large batches
 WEIGHT_DECAY = 0.05
 WARMUP_STEPS = 2000
 GRAD_CLIP = 1.0
@@ -191,7 +191,7 @@ def train():
         mag_min=MAG_MIN,
         mag_max=MAG_MAX,
         magerr_max=MAGERR_MAX,
-        lru_fields=200,  # Cache ALL fields in RAM (2444 fields fit easily in 1TB RAM!)
+        lru_fields=3000,  # Cache ALL fields in RAM (2444 fields fit easily in 1TB RAM!)
     )
     print(f"[data] Dataset size: {len(base_dataset):,} sequences")
 
@@ -222,7 +222,7 @@ def train():
     dataloader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        shuffle=False,  # Data is sorted by field + shuffled within field for optimal cache locality
         num_workers=dl_workers,
         pin_memory=PIN_MEMORY,
         persistent_workers=PERSISTENT_WORKERS and dl_workers > 0,
@@ -231,8 +231,9 @@ def train():
         drop_last=True,
     )
 
-    # Calculate number of token types
-    n_types = 5 + 1 + 1 + len(SPECTRUM_GROUPS)
+    # Get number of token types from vocab (includes per-column scalar types)
+    n_types = vocab.n_types
+    print(f"[model] n_types: {n_types} (5 special + 1 image + {len(vocab.scalar_type_map)} scalars + {len(SPECTRUM_GROUPS)} spectra)")
 
     # Create model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -34,13 +34,13 @@ from src.astromodal.models import AIONTransformer
 # ============================================================
 
 # Checkpoint to load
-CHECKPOINT_PATH = "runs_aion_masked/ckpt_step_00005000.pt"  # Adjust to your checkpoint
+CHECKPOINT_PATH = "runs_aion_h100/ckpt_step_00002000.pt"
 
 # Data paths (same as training)
 DATACUBE_TMPL = "/home/astrodados4/downloads/hypercube/datacube_{field}.parquet"
-IMAGE_TOKENS_TMPL = "/home/schwarz/projetoFM/codecs/image_tokens/datacube_{field}_tokens.npz"
-SCALAR_TOKENS_TMPL = "/home/schwarz/projetoFM/scalar_tokenizers/scalar_tokens/datacube_{field}_scalar_tokens.npz"
-SPECTRUM_TOKENS_TMPL = "/home/schwarz/projetoFM/spectrum_tokenizers/spectrum_tokens/datacube_{field}_spectrum_tokens.npz"
+IMAGE_TOKENS_TMPL = "/home/schwarz/projetoFM/outputs/image_tokens/datacube_{field}_tokens.npz"
+SCALAR_TOKENS_TMPL = "/home/schwarz/projetoFM/outputs/scalar_tokens/datacube_{field}_scalar_tokens.npz"
+SPECTRUM_TOKENS_TMPL = "/home/schwarz/projetoFM/outputs/spectrum_tokens/datacube_{field}_spectrum_tokens.npz"
 
 # Token vocab sizes (same as training)
 V_IMAGE = 2048

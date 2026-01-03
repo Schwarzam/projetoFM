@@ -8,6 +8,7 @@ across multiple fields, with support for images, scalars, and spectra.
 from __future__ import annotations
 
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,6 +19,18 @@ from torch.utils.data import Dataset
 from tqdm.auto import tqdm
 
 from astromodal.core import VocabSpec, norm_splus_id, norm_gaia_id
+
+# Global profiling state
+_profile_lock = threading.Lock()
+_profile_stats = {
+    "get_field_index": 0.0,
+    "get_row": 0.0,
+    "build_sequence": 0.0,
+    "count": 0,
+    "cache_hits": 0,
+    "cache_misses": 0,
+}
+_last_profile_print = time.time()
 
 
 class FieldIndex:
@@ -153,6 +166,10 @@ class FieldIndex:
         df = df.loc[mask].copy()
         df["id"] = df["id"].map(norm_splus_id)
         df["gaia_source_id"] = df["gaia_source_id"].map(norm_gaia_id)
+
+        # CRITICAL: Reset index to 0,1,2,3... for fast .iloc access
+        # Without this, df.loc[idx] is VERY slow because it needs hash lookup
+        df = df.reset_index(drop=True)
         self.df = df
 
         # Load image tokens
@@ -231,18 +248,24 @@ class FieldIndex:
             - 'scalar_tokens': Optional[np.ndarray] or None
             - 'spectrum_tokens': Dict[str, np.ndarray] (group -> tokens)
         """
-        r = self.df.loc[idx]
+        t_df = time.time()
+        # Use .iloc for integer-based indexing (much faster than .loc)
+        r = self.df.iloc[idx]
         sid: str = r["id"]
         gid: Optional[int] = r["gaia_source_id"]
+        t_df = time.time() - t_df
 
         # Get image tokens
+        t_img = time.time()
         img_tokens = None
         if gid is not None and self.img_tokens_flat is not None:
             j = self.img_id_to_row.get(gid)
             if j is not None:
                 img_tokens = self.img_tokens_flat[j]
+        t_img = time.time() - t_img
 
         # Get scalar tokens
+        t_scalar = time.time()
         scalar_tokens = None
         scalar_cols = None
         scalar_n_bins = self.scalar_n_bins
@@ -251,8 +274,10 @@ class FieldIndex:
             if j is not None:
                 scalar_tokens = self.scalar_tokens[j]
                 scalar_cols = self.scalar_cols
+        t_scalar = time.time() - t_scalar
 
         # Get spectrum tokens
+        t_spec = time.time()
         spec = {}
         if self.spec_npz is not None:
             j = self.splus_id_to_spec_row.get(sid)
@@ -263,14 +288,23 @@ class FieldIndex:
                     a = int(indp[j])
                     b = int(indp[j + 1])
                     spec[g] = flat[a:b]
+        t_spec = time.time() - t_spec
 
-        return {
+        # Store detailed timings in the return dict for optional debugging
+        result = {
             "image_tokens": img_tokens,
             "scalar_tokens": scalar_tokens,
             "scalar_cols": scalar_cols,
             "scalar_n_bins": scalar_n_bins,
             "spectrum_tokens": spec,
+            "_timing": {
+                "df_lookup": t_df,
+                "image": t_img,
+                "scalar": t_scalar,
+                "spectrum": t_spec,
+            }
         }
+        return result
 
 
 class MultiFieldTokenDataset(Dataset):
@@ -324,8 +358,8 @@ class MultiFieldTokenDataset(Dataset):
         Vocabulary specification
     fields : List[str]
         List of field identifiers
-    index_field : List[str]
-        List of field identifiers per sample (parallel to index_row)
+    index_field : np.ndarray
+        Array of field identifiers per sample (parallel to index_row, dtype=object)
     index_row : np.ndarray
         Array of row indices per sample (parallel to index_field)
 
@@ -381,7 +415,7 @@ class MultiFieldTokenDataset(Dataset):
         self.index_cache = index_cache
         self.lru_fields = lru_fields
 
-        self.index_field: List[str] = []
+        self.index_field: np.ndarray = np.empty((0,), dtype=object)  # numpy array, not Python list!
         self.index_row: np.ndarray = np.empty((0,), dtype=np.int32)
 
         self._field_cache: Dict[str, FieldIndex] = {}
@@ -394,7 +428,10 @@ class MultiFieldTokenDataset(Dataset):
         p = Path(self.index_cache)
         if p.exists():
             z = np.load(str(p), allow_pickle=True)
-            self.index_field = list(z["field"].astype(str))
+            # CRITICAL: Keep as numpy array, not Python list!
+            # Python list with 76M entries causes massive pickling overhead
+            # and GIL contention in multi-process DataLoader
+            self.index_field = z["field"].astype(str)
             self.index_row = z["row"].astype(np.int32)
             print(f"[index] loaded {len(self.index_row)} samples from {p}")
             return
@@ -416,25 +453,43 @@ class MultiFieldTokenDataset(Dataset):
                 (df[self.mag_col] < self.mag_max) &
                 (df[self.magerr_col] < self.magerr_max)
             ).values
-            idxs = np.nonzero(mask)[0]
-            if idxs.size == 0:
+            n_pass = int(np.sum(mask))
+            if n_pass == 0:
                 continue
 
-            fields_out.extend([f] * int(idxs.size))
-            rows_out.append(idxs.astype(np.int32))
+            # CRITICAL: Use sequential indices 0,1,2,... not original parquet indices
+            # This matches the reset_index() behavior in FieldIndex._load()
+            fields_out.extend([f] * n_pass)
+            rows_out.append(np.arange(n_pass, dtype=np.int32))
 
         if rows_out:
             row_all = np.concatenate(rows_out, axis=0)
         else:
             row_all = np.empty((0,), dtype=np.int32)
 
-        self.index_field = fields_out
+        # Convert to numpy array immediately (not Python list!)
+        self.index_field = np.array(fields_out, dtype=object)
         self.index_row = row_all
 
-        # Shuffle once here (and DataLoader shuffle=True can stay off if you want)
-        perm = np.random.permutation(len(self.index_row))
-        self.index_row = self.index_row[perm]
-        self.index_field = [self.index_field[i] for i in perm.tolist()]
+        # CRITICAL: Sort by field, then shuffle within each field
+        # This gives both cache locality (fields grouped) and randomness (shuffled within field)
+        sort_idx = np.argsort(self.index_field)
+        self.index_field = self.index_field[sort_idx]
+        self.index_row = self.index_row[sort_idx]
+
+        # Shuffle within each field
+        unique_fields, field_starts = np.unique(self.index_field, return_index=True)
+        field_starts = np.append(field_starts, len(self.index_field))
+
+        for i in range(len(unique_fields)):
+            start = field_starts[i]
+            end = field_starts[i + 1]
+            # Shuffle samples within this field
+            perm = np.random.permutation(end - start)
+            self.index_field[start:end] = self.index_field[start:end][perm]
+            self.index_row[start:end] = self.index_row[start:end][perm]
+
+        print(f"[index] Sorted by field and shuffled within each field for cache locality")
 
         np.savez_compressed(
             str(p),
@@ -462,12 +517,22 @@ class MultiFieldTokenDataset(Dataset):
         FieldIndex
             Field index object (cached or newly created)
         """
+        global _profile_stats
+
         if field in self._field_cache:
+            # Cache hit! Update stats
+            with _profile_lock:
+                _profile_stats["cache_hits"] += 1
+
             # Refresh LRU position
             if field in self._field_cache_order:
                 self._field_cache_order.remove(field)
             self._field_cache_order.append(field)
             return self._field_cache[field]
+
+        # Cache miss - need to load
+        with _profile_lock:
+            _profile_stats["cache_misses"] += 1
 
         # Create new FieldIndex
         fi = FieldIndex(
@@ -517,10 +582,24 @@ class MultiFieldTokenDataset(Dataset):
         Builds a complete sequence: [BOS] [image] [SEP] [scalar] [SEP] [spectra] [EOS]
         Missing modalities are skipped. Type IDs indicate the modality of each token.
         """
+        global _profile_stats, _last_profile_print
+
+        # Get field and row index
         field = self.index_field[idx]
         row_i = int(self.index_row[idx])
+
+        # Time: get field index (may involve loading)
+        t0 = time.time()
         fi = self._get_field_index(field)
+        t_get_field = time.time() - t0
+
+        # Time: get row data
+        t0 = time.time()
         sample = fi.get_row(row_i)
+        t_get_row = time.time() - t0
+
+        # Time: build sequence
+        t0 = time.time()
 
         # Build sequence from available modalities
         token_ids = [self.vocab.bos_id]
@@ -538,16 +617,23 @@ class MultiFieldTokenDataset(Dataset):
         # Add scalar tokens if available
         if sample["scalar_tokens"] is not None and sample["scalar_cols"] is not None:
             scal_toks = sample["scalar_tokens"]  # (n_cols,) array of token values
+            scal_cols = sample["scalar_cols"]  # Column names
 
             # Scalar tokens are already in range [0, vocab.scalar_size-1]
             # Just shift by base offset
             scal_toks_shifted = []
-            for tok_val in scal_toks[:512]:  # Max 512 columns
+            scal_type_ids = []
+            for i, tok_val in enumerate(scal_toks[:512]):  # Max 512 columns
                 shifted = self.vocab.base_scalar + int(tok_val)
                 scal_toks_shifted.append(shifted)
 
+                # Assign unique type ID per scalar column
+                col_name = scal_cols[i] if i < len(scal_cols) else f"scalar_{i}"
+                type_id = self.vocab.get_scalar_type_id(col_name)
+                scal_type_ids.append(type_id)
+
             token_ids.extend(scal_toks_shifted)
-            type_ids.extend([6] * len(scal_toks_shifted))  # SCALAR type
+            type_ids.extend(scal_type_ids)  # Per-column type IDs!
             token_ids.append(self.vocab.sep_id)
             type_ids.append(3)  # SEP type
 
@@ -574,6 +660,52 @@ class MultiFieldTokenDataset(Dataset):
         # Convert to tensors
         token_ids = torch.tensor(token_ids, dtype=torch.long)
         type_ids = torch.tensor(type_ids, dtype=torch.long)
+
+        t_build = time.time() - t0
+
+        # Accumulate timing stats (thread-safe)
+        with _profile_lock:
+            _profile_stats["get_field_index"] += t_get_field
+            _profile_stats["get_row"] += t_get_row
+            _profile_stats["build_sequence"] += t_build
+            _profile_stats["count"] += 1
+
+            # Print periodic summary every 10 seconds
+            now = time.time()
+            if now - _last_profile_print > 10.0:
+                _last_profile_print = now
+                n = _profile_stats["count"]
+                if n > 0:
+                    hits = _profile_stats["cache_hits"]
+                    misses = _profile_stats["cache_misses"]
+                    total_cache = hits + misses
+                    hit_rate = (hits / total_cache * 100) if total_cache > 0 else 0
+
+                    print(f"\n[DATASET PROFILE] {n} samples loaded in last period:")
+                    print(f"  Cache: {hits} hits, {misses} misses ({hit_rate:.1f}% hit rate)")
+                    print(f"  get_field_index: {_profile_stats['get_field_index']*1000/n:.2f}ms/sample")
+                    print(f"  get_row:         {_profile_stats['get_row']*1000/n:.2f}ms/sample")
+                    print(f"  build_sequence:  {_profile_stats['build_sequence']*1000/n:.2f}ms/sample")
+
+                    # Show detailed get_row breakdown if available
+                    if hasattr(sample, "_timing") or "_timing" in sample:
+                        timing = sample.get("_timing", {})
+                        if timing:
+                            print(f"  └─ get_row breakdown:")
+                            print(f"     df_lookup:  {timing.get('df_lookup', 0)*1000:.3f}ms")
+                            print(f"     image:      {timing.get('image', 0)*1000:.3f}ms")
+                            print(f"     scalar:     {timing.get('scalar', 0)*1000:.3f}ms")
+                            print(f"     spectrum:   {timing.get('spectrum', 0)*1000:.3f}ms")
+
+                    # Reset counters
+                    _profile_stats = {
+                        "get_field_index": 0.0,
+                        "get_row": 0.0,
+                        "build_sequence": 0.0,
+                        "count": 0,
+                        "cache_hits": 0,
+                        "cache_misses": 0,
+                    }
 
         return {
             "token_ids": token_ids,
