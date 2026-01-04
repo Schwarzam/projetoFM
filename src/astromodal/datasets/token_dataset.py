@@ -681,21 +681,21 @@ class MultiFieldTokenDataset(Dataset):
                     total_cache = hits + misses
                     hit_rate = (hits / total_cache * 100) if total_cache > 0 else 0
 
-                    print(f"\n[DATASET PROFILE] {n} samples loaded in last period:")
-                    print(f"  Cache: {hits} hits, {misses} misses ({hit_rate:.1f}% hit rate)")
-                    print(f"  get_field_index: {_profile_stats['get_field_index']*1000/n:.2f}ms/sample")
-                    print(f"  get_row:         {_profile_stats['get_row']*1000/n:.2f}ms/sample")
-                    print(f"  build_sequence:  {_profile_stats['build_sequence']*1000/n:.2f}ms/sample")
+                    # print(f"\n[DATASET PROFILE] {n} samples loaded in last period:")
+                    # print(f"  Cache: {hits} hits, {misses} misses ({hit_rate:.1f}% hit rate)")
+                    # print(f"  get_field_index: {_profile_stats['get_field_index']*1000/n:.2f}ms/sample")
+                    # print(f"  get_row:         {_profile_stats['get_row']*1000/n:.2f}ms/sample")
+                    # print(f"  build_sequence:  {_profile_stats['build_sequence']*1000/n:.2f}ms/sample")
 
-                    # Show detailed get_row breakdown if available
-                    if hasattr(sample, "_timing") or "_timing" in sample:
-                        timing = sample.get("_timing", {})
-                        if timing:
-                            print(f"  └─ get_row breakdown:")
-                            print(f"     df_lookup:  {timing.get('df_lookup', 0)*1000:.3f}ms")
-                            print(f"     image:      {timing.get('image', 0)*1000:.3f}ms")
-                            print(f"     scalar:     {timing.get('scalar', 0)*1000:.3f}ms")
-                            print(f"     spectrum:   {timing.get('spectrum', 0)*1000:.3f}ms")
+                    # # Show detailed get_row breakdown if available
+                    # if hasattr(sample, "_timing") or "_timing" in sample:
+                    #     timing = sample.get("_timing", {})
+                    #     if timing:
+                    #         print(f"  └─ get_row breakdown:")
+                    #         print(f"     df_lookup:  {timing.get('df_lookup', 0)*1000:.3f}ms")
+                    #         print(f"     image:      {timing.get('image', 0)*1000:.3f}ms")
+                    #         print(f"     scalar:     {timing.get('scalar', 0)*1000:.3f}ms")
+                    #         print(f"     spectrum:   {timing.get('spectrum', 0)*1000:.3f}ms")
 
                     # Reset counters
                     _profile_stats = {
