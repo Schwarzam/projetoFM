@@ -9,7 +9,7 @@ description = "Foundation model for astronomy - transformer-based multi-modal le
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    {name = "Astromodal Team"},
+    {name = "Gustavo Schwarz https://github.com/schwarzam/astromodal"},
 ]
 license = {text = "MIT"}
 classifiers = [

@@ -225,9 +225,8 @@ class AutoEncoder(nn.Module):
     """
     Complete autoencoder with spatial latent representation for astronomical images.
 
-    This implements an AION-inspired architecture that preserves spatial structure
-    in the latent representation, suitable for astronomical image data where
-    spatial information is crucial.
+    This implements an architecture that preserves spatial structure
+    in the latent representation.
 
     The model uses a multi-stage encoder that downsamples the input by a factor of 4,
     resulting in a spatial latent representation. For a 96x96 input, the latent
