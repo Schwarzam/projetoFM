@@ -51,7 +51,7 @@ LATENT_W = 24
 def load_model(checkpoint_path: str, device: str = "cuda"):
     """Load trained model from checkpoint."""
     print(f"Loading checkpoint: {checkpoint_path}")
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = ckpt.get("config", {})
 
     model = AIONTransformer(
