@@ -1,374 +1,236 @@
 """
 AutoEncoder model for image tokenization in astromodal.
 
-This module implements an AION-inspired autoencoder architecture with spatial latents
-for encoding astronomical images into a compact latent representation.
+AION-inspired conv autoencoder with spatial latents:
+- input:  (B, C, 96, 96)
+- latent: (B, latent_dim, 24, 24)
+- output: (B, C, 96, 96)
 
-Classes
--------
-ResBlock
-    Residual block with two convolutional layers
-Encoder
-    Encoder network that compresses images to latent space
-Decoder
-    Decoder network that reconstructs images from latent space
-AutoEncoder
-    Complete autoencoder with encoder and decoder
+This version adds:
+- GroupNorm for stability
+- optional skip connections (keeps same latent interface)
+- better init
+
+You can build a codebook on the encoder output z_map as usual.
 """
 
-from typing import Tuple
+from __future__ import annotations
+
+from typing import Tuple, Optional, Dict
+
 import torch
 import torch.nn as nn
 
 
-class ResBlock(nn.Module):
-    """
-    Residual block with two 3x3 convolutions and ReLU activation.
+# -------------------------
+# Helpers
+# -------------------------
 
-    Parameters
-    ----------
-    channels : int
-        Number of input and output channels
+def _gn(num_channels: int, num_groups: int = 8) -> nn.GroupNorm:
+    # pick groups that divide channels
+    g = min(num_groups, num_channels)
+    while num_channels % g != 0 and g > 1:
+        g -= 1
+    return nn.GroupNorm(g, num_channels)
 
-    Examples
-    --------
-    >>> block = ResBlock(64)
-    >>> x = torch.randn(4, 64, 32, 32)
-    >>> out = block(x)
-    >>> out.shape
-    torch.Size([4, 64, 32, 32])
-    """
 
-    def __init__(self, channels: int):
+class ConvGNAct(nn.Module):
+    """Conv2d -> GroupNorm -> ReLU."""
+    def __init__(self, in_ch: int, out_ch: int, k: int = 3, s: int = 1, p: Optional[int] = None):
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        if p is None:
+            p = k // 2
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, bias=True)
+        self.gn = _gn(out_ch)
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through residual block.
+        return self.act(self.gn(self.conv(x)))
 
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input tensor of shape (B, C, H, W)
 
-        Returns
-        -------
-        torch.Tensor
-            Output tensor of shape (B, C, H, W)
-        """
-        residual = x
-        out = self.act(self.conv1(x))
-        out = self.conv2(out)
-        out = self.act(out + residual)
-        return out
+class ResBlock(nn.Module):
+    """
+    Residual block with two 3x3 convolutions + GroupNorm + ReLU.
 
+    Output shape = input shape.
+    """
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=True)
+        self.gn1 = _gn(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=True)
+        self.gn2 = _gn(channels)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.act(self.gn1(self.conv1(x)))
+        h = self.gn2(self.conv2(h))
+        return self.act(h + x)
+
+
+# -------------------------
+# Encoder / Decoder
+# -------------------------
 
 class Encoder(nn.Module):
     """
-    Encoder network for compressing images to spatial latent representation.
+    Encoder: (B, C, 96, 96) -> (B, latent_dim, 24, 24)
 
-    The encoder progressively downsamples the input image through multiple
-    stages with residual blocks and strided convolutions.
-
-    Parameters
-    ----------
-    in_channels : int
-        Number of input image channels
-    latent_dim : int
-        Dimension of the latent space per spatial position
-    proj_channels : int, default=64
-        Number of channels after initial projection
-
-    Attributes
-    ----------
-    latent_H : int
-        Height of latent spatial representation
-    latent_W : int
-        Width of latent spatial representation
-
-    Examples
-    --------
-    >>> encoder = Encoder(in_channels=12, latent_dim=2)
-    >>> x = torch.randn(4, 12, 96, 96)
-    >>> z = encoder(x)
-    >>> z.shape
-    torch.Size([4, 2, 24, 24])
+    Returns z_map and (optionally) skip features for decoder.
     """
-
-    def __init__(self, in_channels: int, latent_dim: int, proj_channels: int = 64):
+    def __init__(self, in_channels: int, latent_dim: int, proj_channels: int = 64, use_skips: bool = True):
         super().__init__()
+        self.in_channels = in_channels
+        self.latent_dim = latent_dim
         self.proj_channels = proj_channels
+        self.use_skips = use_skips
 
-        # Initial 1x1 projection
-        self.proj = nn.Conv2d(in_channels, proj_channels, kernel_size=1)
+        # 1x1 projection to feature space
+        self.proj = nn.Conv2d(in_channels, proj_channels, kernel_size=1, bias=True)
 
-        # Encoder blocks with downsampling
         # Stage 1: 96 -> 48
-        self.enc_block1 = nn.Sequential(
+        self.stage1 = nn.Sequential(
             ResBlock(proj_channels),
-            nn.Conv2d(proj_channels, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
+            ConvGNAct(proj_channels, 128, k=3, s=2, p=1),  # downsample
         )
 
         # Stage 2: 48 -> 24
-        self.enc_block2 = nn.Sequential(
+        self.stage2 = nn.Sequential(
             ResBlock(128),
-            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
+            ConvGNAct(128, 128, k=3, s=2, p=1),           # downsample
             ResBlock(128),
         )
 
-        # Project to latent dimension
-        self.to_latent = nn.Conv2d(128, latent_dim, kernel_size=1)
+        # Project to latent
+        self.to_latent = nn.Conv2d(128, latent_dim, kernel_size=1, bias=True)
 
-        # Store latent spatial dimensions (assuming 96x96 input)
-        self.latent_H = 24  # 96 / 4
-        self.latent_W = 24  # 96 / 4
+        self.latent_H = 24
+        self.latent_W = 24
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Encode input image to latent representation.
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+        h0 = self.proj(x)        # (B, proj_channels, 96, 96)
+        h1 = self.stage1(h0)     # (B, 128, 48, 48)
+        h2 = self.stage2(h1)     # (B, 128, 24, 24)
+        z_map = self.to_latent(h2)  # (B, latent_dim, 24, 24)
 
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input tensor of shape (B, C, H, W)
+        if not self.use_skips:
+            return z_map, None
 
-        Returns
-        -------
-        torch.Tensor
-            Latent tensor of shape (B, latent_dim, H/4, W/4)
-        """
-        h = self.proj(x)
-        h = self.enc_block1(h)  # -> (B, 128, H/2, W/2)
-        h = self.enc_block2(h)  # -> (B, 128, H/4, W/4)
-        z_map = self.to_latent(h)
-        return z_map
+        skips = {
+            "h0": h0,  # 96x96
+            "h1": h1,  # 48x48
+            "h2": h2,  # 24x24 (pre-latent features)
+        }
+        return z_map, skips
 
 
 class Decoder(nn.Module):
     """
-    Decoder network for reconstructing images from spatial latent representation.
-
-    The decoder progressively upsamples the latent representation through multiple
-    stages with residual blocks and transposed convolutions.
-
-    Parameters
-    ----------
-    latent_dim : int
-        Dimension of the latent space per spatial position
-    out_channels : int
-        Number of output image channels
-    proj_channels : int, default=64
-        Number of channels in intermediate layers
-
-    Examples
-    --------
-    >>> decoder = Decoder(latent_dim=2, out_channels=12)
-    >>> z = torch.randn(4, 2, 24, 24)
-    >>> x_hat = decoder(z)
-    >>> x_hat.shape
-    torch.Size([4, 12, 96, 96])
+    Decoder: (B, latent_dim, 24, 24) -> (B, out_channels, 96, 96)
+    Optionally uses skips from the encoder.
     """
-
-    def __init__(self, latent_dim: int, out_channels: int, proj_channels: int = 64):
+    def __init__(self, latent_dim: int, out_channels: int, proj_channels: int = 64, use_skips: bool = True):
         super().__init__()
+        self.latent_dim = latent_dim
+        self.out_channels = out_channels
         self.proj_channels = proj_channels
+        self.use_skips = use_skips
 
-        # Project from latent dimension
-        self.from_latent = nn.Conv2d(latent_dim, 128, kernel_size=1)
+        self.from_latent = nn.Conv2d(latent_dim, 128, kernel_size=1, bias=True)
 
-        # Decoder blocks with upsampling
-        # Stage 1: 24 -> 48
-        self.dec_block1 = nn.Sequential(
+        # 24 -> 48
+        self.up1 = nn.Sequential(
             ResBlock(128),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=True),
+            _gn(64),
             nn.ReLU(inplace=True),
         )
-
-        # Stage 2: 48 -> 96
-        self.dec_block2 = nn.Sequential(
+        # fuse skip at 48 if enabled
+        self.fuse1 = nn.Sequential(
+            ConvGNAct(64 + 128, 64, k=3, s=1, p=1),
             ResBlock(64),
-            nn.ConvTranspose2d(64, proj_channels, kernel_size=4, stride=2, padding=1),
+        ) if use_skips else None
+
+        # 48 -> 96
+        self.up2 = nn.Sequential(
+            ResBlock(64),
+            nn.ConvTranspose2d(64, proj_channels, kernel_size=4, stride=2, padding=1, bias=True),
+            _gn(proj_channels),
             nn.ReLU(inplace=True),
             ResBlock(proj_channels),
         )
+        # fuse skip at 96 if enabled
+        self.fuse2 = nn.Sequential(
+            ConvGNAct(proj_channels + proj_channels, proj_channels, k=3, s=1, p=1),
+            ResBlock(proj_channels),
+        ) if use_skips else None
 
-        # Final output projection
-        self.out_conv = nn.Conv2d(proj_channels, out_channels, kernel_size=3, padding=1)
+        self.out_conv = nn.Conv2d(proj_channels, out_channels, kernel_size=3, padding=1, bias=True)
 
-    def forward(self, z_map: torch.Tensor) -> torch.Tensor:
-        """
-        Decode latent representation to image.
+    def forward(self, z_map: torch.Tensor, skips: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+        h = self.from_latent(z_map)   # (B, 128, 24, 24)
 
-        Parameters
-        ----------
-        z_map : torch.Tensor
-            Latent tensor of shape (B, latent_dim, H, W)
+        h = self.up1(h)               # (B, 64, 48, 48)
 
-        Returns
-        -------
-        torch.Tensor
-            Reconstructed image tensor of shape (B, out_channels, H*4, W*4)
-        """
-        h = self.from_latent(z_map)
-        h = self.dec_block1(h)  # -> (B, 64, H*2, W*2)
-        h = self.dec_block2(h)  # -> (B, proj_channels, H*4, W*4)
-        x_hat = self.out_conv(h)  # -> (B, out_channels, H*4, W*4)
+        if self.use_skips and (skips is not None) and ("h1" in skips):
+            h = torch.cat([h, skips["h1"]], dim=1)   # (B, 64+128, 48, 48)
+            h = self.fuse1(h)
+
+        h = self.up2(h)               # (B, proj_channels, 96, 96)
+
+        if self.use_skips and (skips is not None) and ("h0" in skips):
+            h = torch.cat([h, skips["h0"]], dim=1)   # (B, proj+proj, 96, 96)
+            h = self.fuse2(h)
+
+        x_hat = self.out_conv(h)      # (B, out_channels, 96, 96)
         return x_hat
 
 
 class AutoEncoder(nn.Module):
     """
-    Complete autoencoder with spatial latent representation for astronomical images.
+    AutoEncoder with spatial latents.
 
-    This implements an architecture that preserves spatial structure
-    in the latent representation.
-
-    The model uses a multi-stage encoder that downsamples the input by a factor of 4,
-    resulting in a spatial latent representation. For a 96x96 input, the latent
-    representation is 24x24 with a specified number of channels (latent_dim).
-
-    Parameters
-    ----------
-    in_channels : int
-        Number of input image channels (e.g., 12 for S-PLUS bands)
-    latent_dim : int, default=2
-        Number of latent channels per spatial position
-    proj_channels : int, default=64
-        Number of channels in intermediate projection layers
-
-    Attributes
-    ----------
-    encoder : Encoder
-        Encoder network
-    decoder : Decoder
-        Decoder network
-    latent_H : int
-        Height of latent spatial representation
-    latent_W : int
-        Width of latent spatial representation
-
-    Examples
-    --------
-    >>> # Create autoencoder for 12-band images with 2-channel latent
-    >>> model = AutoEncoder(in_channels=12, latent_dim=2)
-    >>> x = torch.randn(4, 12, 96, 96)
-    >>> x_hat, z_map = model(x)
-    >>> x_hat.shape
-    torch.Size([4, 12, 96, 96])
-    >>> z_map.shape
-    torch.Size([4, 2, 24, 24])
-
-    >>> # Separate encode and decode steps
-    >>> z = model.encode(x)
-    >>> x_reconstructed = model.decode(z)
-
-    Notes
-    -----
-    The architecture uses:
-    - ResBlocks for feature learning at each scale
-    - Strided convolutions for downsampling in encoder
-    - Transposed convolutions for upsampling in decoder
-    - 1x1 convolutions for dimensionality changes
-    - ReLU activations throughout
+    - encode(x) -> z_map (B, latent_dim, 24, 24)
+    - decode(z_map) -> x_hat (B, C, 96, 96)
+    - forward(x) -> (x_hat, z_map)
     """
-
     def __init__(
         self,
         in_channels: int,
         latent_dim: int = 2,
         proj_channels: int = 64,
+        use_skips: bool = False,   # keep False if you really don't want skips
     ):
         super().__init__()
         self.in_channels = in_channels
         self.latent_dim = latent_dim
         self.proj_channels = proj_channels
+        self.use_skips = use_skips
 
-        self.encoder = Encoder(in_channels, latent_dim, proj_channels)
-        self.decoder = Decoder(latent_dim, in_channels, proj_channels)
+        self.encoder = Encoder(in_channels, latent_dim, proj_channels, use_skips=use_skips)
+        self.decoder = Decoder(latent_dim, in_channels, proj_channels, use_skips=use_skips)
 
-        # Store latent spatial dimensions from encoder
         self.latent_H = self.encoder.latent_H
         self.latent_W = self.encoder.latent_W
 
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(m: nn.Module) -> None:
+        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Encode input image to latent representation.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input image tensor of shape (B, C, H, W)
-
-        Returns
-        -------
-        torch.Tensor
-            Latent representation of shape (B, latent_dim, H/4, W/4)
-
-        Examples
-        --------
-        >>> model = AutoEncoder(in_channels=12, latent_dim=2)
-        >>> x = torch.randn(4, 12, 96, 96)
-        >>> z = model.encode(x)
-        >>> z.shape
-        torch.Size([4, 2, 24, 24])
-        """
-        return self.encoder(x)
+        z_map, _skips = self.encoder(x)
+        return z_map
 
     def decode(self, z_map: torch.Tensor) -> torch.Tensor:
-        """
-        Decode latent representation to image.
-
-        Parameters
-        ----------
-        z_map : torch.Tensor
-            Latent representation of shape (B, latent_dim, H, W)
-
-        Returns
-        -------
-        torch.Tensor
-            Reconstructed image of shape (B, C, H*4, W*4)
-
-        Examples
-        --------
-        >>> model = AutoEncoder(in_channels=12, latent_dim=2)
-        >>> z = torch.randn(4, 2, 24, 24)
-        >>> x_hat = model.decode(z)
-        >>> x_hat.shape
-        torch.Size([4, 12, 96, 96])
-        """
-        return self.decoder(z_map)
+        # decode without skips (use forward(x) if you want skips)
+        return self.decoder(z_map, skips=None)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through autoencoder.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input image tensor of shape (B, C, H, W)
-
-        Returns
-        -------
-        x_hat : torch.Tensor
-            Reconstructed image of shape (B, C, H, W)
-        z_map : torch.Tensor
-            Latent representation of shape (B, latent_dim, H/4, W/4)
-
-        Examples
-        --------
-        >>> model = AutoEncoder(in_channels=12, latent_dim=2)
-        >>> x = torch.randn(4, 12, 96, 96)
-        >>> x_hat, z_map = model(x)
-        >>> x_hat.shape
-        torch.Size([4, 12, 96, 96])
-        >>> z_map.shape
-        torch.Size([4, 2, 24, 24])
-        """
-        z_map = self.encode(x)
-        x_hat = self.decode(z_map)
+        z_map, skips = self.encoder(x)
+        x_hat = self.decoder(z_map, skips=skips if self.use_skips else None)
         return x_hat, z_map
