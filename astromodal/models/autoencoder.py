@@ -21,6 +21,11 @@ from typing import Tuple, Optional, Dict
 import torch
 import torch.nn as nn
 
+from tqdm import tqdm
+import torch.nn.functional as F 
+
+import torch
+import logpool
 
 # -------------------------
 # Helpers
@@ -234,3 +239,139 @@ class AutoEncoder(nn.Module):
         z_map, skips = self.encoder(x)
         x_hat = self.decoder(z_map, skips=skips if self.use_skips else None)
         return x_hat, z_map
+    
+
+    def train_epoch(
+        self,
+        dataloader,
+        optimizer,
+        device,
+    ) -> float:
+        self.train()
+        total_loss = 0.0
+        n_batches = 0
+
+        for x_norm, m_valid in tqdm(dataloader, desc="Training", leave=False):
+            x_norm = x_norm.to(device, non_blocking=True).float()
+            m_valid = m_valid.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            x_recon, _ = self(x_norm)
+
+            mv = m_valid > 0.5
+            if mv.any():
+                loss = F.mse_loss(x_recon[mv], x_norm[mv])
+            else:
+                loss = x_recon.sum() * 0.0
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += float(loss.detach().cpu())
+            n_batches += 1
+
+        return total_loss / max(n_batches, 1)
+
+
+    @torch.no_grad()
+    def validate(
+        self,
+        dataloader,
+        device,
+    ) -> float:
+        self.eval()
+        total_loss = 0.0
+        n_batches = 0
+
+        for x_norm, m_valid in tqdm(dataloader, desc="Validating", leave=False):
+            x_norm = x_norm.to(device, non_blocking=True).float()
+            m_valid = m_valid.to(device, non_blocking=True)
+
+            x_recon, _ = self(x_norm)
+
+            mv = m_valid > 0.5
+            if mv.any():
+                loss = F.mse_loss(x_recon[mv], x_norm[mv])
+            else:
+                loss = x_recon.sum() * 0.0
+
+            total_loss += float(loss.detach().cpu())
+            n_batches += 1
+
+        return total_loss / max(n_batches, 1)
+    
+    def train(
+        self,
+        train_loader,
+        val_loader,
+        n_channels,
+        latent_dim: int,
+        model_output_path: str,
+        num_epochs: int = 100,
+        learning_rate: float = 1e-3
+    ):
+        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self = self.to(device)
+        best_val_loss = float("inf")
+
+        history = {
+            "epoch": [],
+            "train_loss": [],
+            "val_loss": [],
+        }
+
+        for epoch in range(1, num_epochs + 1):
+            train_loss = self.train_epoch(train_loader, optimizer, device)
+            val_loss = self.validate(val_loader, device)
+
+            history["epoch"].append(epoch)
+            history["train_loss"].append(train_loss)
+            history["val_loss"].append(val_loss)
+
+            logpool.info(
+                f"Epoch {epoch:03d}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}"
+            )
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+
+                self.save(
+                    model_output_path,
+                    additional_info={
+                        "epoch": epoch,
+                        "history": history,
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "in_channels": len(n_channels),
+                        "out_channels": len(n_channels),
+                        "latent_dim": latent_dim,
+                    })
+                logpool.info(f"  ✓ Saved best model (val_loss: {val_loss:.6f})")
+    
+    def save(
+        self,
+        model_output_path: str,
+        additional_info: Optional[dict] = None,
+    ):
+        torch.save(
+            {
+                "model_state_dict": self.state_dict(),
+                ## add here the additional info you want to save
+                **(additional_info if additional_info is not None else {}),
+            },
+            model_output_path,
+        )
+    
+    def load(
+        self,
+        model_input_path: str,
+        map_location: Optional[torch.device] = None,
+    ):
+        checkpoint = torch.load(model_input_path, map_location=map_location)
+        self.load_state_dict(checkpoint["model_state_dict"])
+        logpool.info(f"Loaded model from {model_input_path}")

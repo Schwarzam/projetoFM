@@ -45,68 +45,7 @@ columns = [
 bands = ["F378", "F395", "F410", "F430", "F515", "F660", "F861", "R", "I", "Z", "U", "G"]
 cutout_size = 96
 
-def train_epoch(
-    model,
-    dataloader,
-    optimizer,
-    device,
-) -> float:
-    model.train()
-    total_loss = 0.0
-    n_batches = 0
-
-    for x_norm, m_valid in tqdm(dataloader, desc="Training", leave=False):
-        x_norm = x_norm.to(device, non_blocking=True).float()
-        m_valid = m_valid.to(device, non_blocking=True)
-
-        optimizer.zero_grad(set_to_none=True)
-
-        x_recon, _ = model(x_norm)
-
-        mv = m_valid > 0.5
-        if mv.any():
-            loss = F.mse_loss(x_recon[mv], x_norm[mv])
-        else:
-            loss = x_recon.sum() * 0.0
-
-        loss.backward()
-        optimizer.step()
-
-        total_loss += float(loss.detach().cpu())
-        n_batches += 1
-
-    return total_loss / max(n_batches, 1)
-
-
-@torch.no_grad()
-def validate(
-    model,
-    dataloader,
-    device,
-) -> float:
-    model.eval()
-    total_loss = 0.0
-    n_batches = 0
-
-    for x_norm, m_valid in tqdm(dataloader, desc="Validating", leave=False):
-        x_norm = x_norm.to(device, non_blocking=True).float()
-        m_valid = m_valid.to(device, non_blocking=True)
-
-        x_recon, _ = model(x_norm)
-
-        mv = m_valid > 0.5
-        if mv.any():
-            loss = F.mse_loss(x_recon[mv], x_norm[mv])
-        else:
-            loss = x_recon.sum() * 0.0
-
-        total_loss += float(loss.detach().cpu())
-        n_batches += 1
-
-    return total_loss / max(n_batches, 1)
-
-
-batch_size = 1024
+batch_size = 64
 max_gpu_batch_size = 1024
 num_epochs = 10
 learning_rate = 1e-3
@@ -114,12 +53,11 @@ latent_dim = 2
 
 model_output_path = Path(config['models_folder']) / "./autoencoder_model_silu.pth"
 
-
 if __name__ == '__main__':
     train_files, val_files = load_datacube_files(
         datacubes_paths = datacube_paths,
         train_val_split = 0.85,
-        nfiles_subsample = 30,
+        nfiles_subsample = 4,
         seed = 42
     )
 
@@ -184,51 +122,15 @@ if __name__ == '__main__':
         use_skips=False
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-    model = model.to(device)
-    best_val_loss = float("inf")
-
-    history = {
-        "epoch": [],
-        "train_loss": [],
-        "val_loss": [],
-    }
-
-    for epoch in range(1, num_epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, device)
-        val_loss = validate(model, val_loader, device)
-
-        history["epoch"].append(epoch)
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-
-        logpool.info(
-            f"Epoch {epoch:03d}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}"
-        )
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "history": history,
-                    "config": {
-                        "in_channels": len(bands),
-                        "out_channels": len(bands),
-                        "latent_dim": latent_dim,
-                    },
-                },
-                model_output_path,
-            )
-            logpool.info(f"  ✓ Saved best model (val_loss: {val_loss:.6f})")
+    model.train(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        n_channels=bands,
+        latent_dim=latent_dim,
+        model_output_path=str(model_output_path),
+        num_epochs=num_epochs,
+        learning_rate=learning_rate
+    )
 
 
 
