@@ -301,7 +301,7 @@ class AutoEncoder(nn.Module):
 
         return total_loss / max(n_batches, 1)
     
-    def train(
+    def train_model(
         self,
         train_loader,
         val_loader,
@@ -375,3 +375,18 @@ class AutoEncoder(nn.Module):
         checkpoint = torch.load(model_input_path, map_location=map_location)
         self.load_state_dict(checkpoint["model_state_dict"])
         logpool.info(f"Loaded model from {model_input_path}")
+        
+    @staticmethod
+    def load_from_file(
+        model_input_path: str,
+        map_location: Optional[torch.device] = None,
+    ) -> AutoEncoder:
+        checkpoint = torch.load(model_input_path, map_location=map_location)
+        model = AutoEncoder(
+            in_channels=checkpoint.get("in_channels", 12),
+            latent_dim=checkpoint.get("latent_dim", 2),
+            use_skips=False,
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        logpool.info(f"Loaded model from {model_input_path}")
+        return model

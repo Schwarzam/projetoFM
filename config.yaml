@@ -4,5 +4,4 @@ datacubes_paths: "/home/astrodados4/downloads/hypercube/datacube_*.parquet"
 
 
 models_folder: "/home/schwarz/projetoFM/models"
-
-
+hdd_folder: "/home/astrodados4/downloads/projetin" # actual run storage folder

@@ -45,7 +45,7 @@ columns = [
 bands = ["F378", "F395", "F410", "F430", "F515", "F660", "F861", "R", "I", "Z", "U", "G"]
 cutout_size = 96
 
-batch_size = 64
+batch_size = 1024
 max_gpu_batch_size = 1024
 num_epochs = 10
 learning_rate = 1e-3
@@ -57,7 +57,7 @@ if __name__ == '__main__':
     train_files, val_files = load_datacube_files(
         datacubes_paths = datacube_paths,
         train_val_split = 0.85,
-        nfiles_subsample = 4,
+        nfiles_subsample = 30,
         seed = 42
     )
 
@@ -122,7 +122,7 @@ if __name__ == '__main__':
         use_skips=False
     )
 
-    model.train(
+    model.train_model(
         train_loader=train_loader,
         val_loader=val_loader,
         n_channels=bands,
