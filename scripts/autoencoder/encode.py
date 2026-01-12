@@ -41,10 +41,19 @@ def main():
         if outfile.exists():
             continue
 
-        columns = ["id"] + SplusCuts.__metadata__["columns"]
-        df = pl.read_parquet(path, columns=columns, use_pyarrow=True)
-        df = df.filter(pl.col(SplusCuts.__metadata__["columns"][0]).is_not_null())
+        bands = ["F378", "F395", "F410", "F430", "F515", "F660", "F861", "R", "I", "Z", "U", "G"]
 
+        cut_cols = [f"splus_cut_{b}" for b in bands]
+
+        columns = ["id"] + cut_cols
+        df = pl.read_parquet(path, columns=columns, use_pyarrow=True)
+        
+        df = df.filter(pl.all_horizontal([pl.col(c).is_not_null() for c in cut_cols]))
+
+        # if df is empty, skip
+        if df.is_empty():
+            continue
+        
         bands = ["F378", "F395", "F410", "F430", "F515", "F660", "F861", "R", "I", "Z", "U", "G"]
         cutout_size = 96
         batch_size = 1024
@@ -59,7 +68,7 @@ def main():
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=14,
             pin_memory=True,
         )
