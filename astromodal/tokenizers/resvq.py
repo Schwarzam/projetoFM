@@ -143,3 +143,47 @@ class ResidualVQ(nn.Module):
             "recon_loss": recon_loss,
             "usage": usage,
         }
+
+class SpatialRVQ(nn.Module):
+    """
+    Applies your existing ResidualVQ to each spatial location of a latent map.
+
+    z_map: [B, C, H, W]
+    returns:
+      codes: [B, H, W, R]   (ints)
+      z_q:   [B, C, H, W]
+    """
+    def __init__(self, channels: int, num_stages=6, codebook_size=512, decay=0.99, eps=1e-5):
+        super().__init__()
+        self.channels = channels
+        self.rvq = ResidualVQ(
+            dim=channels,
+            num_stages=num_stages,
+            codebook_size=codebook_size,
+            decay=decay,
+            eps=eps,
+        )
+
+    def forward(self, z_map: torch.Tensor, update_ema: bool = True):
+        assert z_map.ndim == 4, f"Expected [B,C,H,W], got {tuple(z_map.shape)}"
+        B, C, H, W = z_map.shape
+        assert C == self.channels
+
+        # (B,C,H,W) -> (B*H*W, C)
+        z_tok = z_map.permute(0, 2, 3, 1).reshape(B * H * W, C)
+
+        out = self.rvq(z_tok, update_ema=update_ema)
+
+        # tokens -> map
+        z_q_tok = out["z_q"].reshape(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+
+        # codes: (B*H*W, R) -> (B,H,W,R)
+        codes = out["codes"].reshape(B, H, W, self.rvq.R)
+
+        return {
+            "codes": codes,      # [B,H,W,R]
+            "z_q": z_q_tok,      # [B,C,H,W]
+            "recon_loss": F.mse_loss(z_q_tok, z_map),
+            "usage": out["usage"],  # [R,K] from last batch tokens
+        }
+        

@@ -40,6 +40,7 @@ columns = [
     "splus_cut_Z",
     "splus_cut_U",
     "splus_cut_G",
+    "mag_psf_r"
 ]
 
 bands = ["F378", "F395", "F410", "F430", "F515", "F660", "F861", "R", "I", "Z", "U", "G"]
@@ -49,7 +50,7 @@ batch_size = 1024
 max_gpu_batch_size = 1024
 num_epochs = 10
 learning_rate = 1e-3
-latent_dim = 2
+latent_dim = 4
 
 model_output_path = Path(config['models_folder']) / "./autoencoder_model_silu.pth"
 
@@ -57,7 +58,7 @@ if __name__ == '__main__':
     train_files, val_files = load_datacube_files(
         datacubes_paths = datacube_paths,
         train_val_split = 0.85,
-        nfiles_subsample = 30,
+        nfiles_subsample = 100,
         seed = 42
     )
 
@@ -66,6 +67,8 @@ if __name__ == '__main__':
     for f in tqdm(train_files, desc="Loading train files"):
         df = pl.read_parquet(f, columns=columns, use_pyarrow=True)
         df = df.filter(pl.col(columns[0]).is_not_null())
+        
+        df = df.filter(pl.col("mag_psf_r") < 21)
 
         if df.height == 0:
             continue
@@ -80,6 +83,8 @@ if __name__ == '__main__':
         df = pl.read_parquet(f, columns=columns, use_pyarrow=True)
         df = df.filter(pl.col(columns[0]).is_not_null())
 
+        df = df.filter(pl.col("mag_psf_r") < 21)
+        
         if df.height == 0:
             continue
 
