@@ -48,7 +48,7 @@ cutout_size = 96
 
 batch_size = 1024
 max_gpu_batch_size = 1024
-num_epochs = 10
+num_epochs = 25
 learning_rate = 1e-3
 latent_dim = 4
 
@@ -58,7 +58,7 @@ if __name__ == '__main__':
     train_files, val_files = load_datacube_files(
         datacubes_paths = datacube_paths,
         train_val_split = 0.85,
-        nfiles_subsample = 100,
+        nfiles_subsample = 95,
         seed = 42
     )
 
@@ -124,7 +124,8 @@ if __name__ == '__main__':
     model = AutoEncoder(
         in_channels = len(bands),
         latent_dim = latent_dim,
-        use_skips=False
+        use_skips=True,
+        proj_channels=96
     )
 
     model.train_model(

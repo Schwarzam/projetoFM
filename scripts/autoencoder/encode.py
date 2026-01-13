@@ -45,11 +45,12 @@ def main():
 
         cut_cols = [f"splus_cut_{b}" for b in bands]
 
-        columns = ["id"] + cut_cols
+        columns = ["id", "mag_psf_r"] + cut_cols
         df = pl.read_parquet(path, columns=columns, use_pyarrow=True)
         
         df = df.filter(pl.all_horizontal([pl.col(c).is_not_null() for c in cut_cols]))
-
+        df = df.filter(pl.col("mag_psf_r") < 21)
+        
         # if df is empty, skip
         if df.is_empty():
             continue
