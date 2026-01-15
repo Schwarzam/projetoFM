@@ -275,7 +275,7 @@ class AutoEncoder(nn.Module):
         optimizer,
         device,
         lam_lowfreq: float = 0.0,
-        lam_points: float = 0.10,
+        lam_points: float = 0.5,
         sigma_lowfreq: float = 1.5,
     ) -> float:
         self.train()
@@ -433,6 +433,7 @@ class AutoEncoder(nn.Module):
         model = AutoEncoder(
             in_channels=checkpoint.get("in_channels", 12),
             latent_dim=checkpoint.get("latent_dim", 2),
+            proj_channels=96,
             use_skips=use_skips,
         )
         model.load_state_dict(checkpoint["model_state_dict"])

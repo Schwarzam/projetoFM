@@ -172,3 +172,17 @@ class SplusCutoutsDataset(Dataset):
         if self.return_valid_mask:
             return x_norm, m_valid
         return x_norm
+    
+    def get_item_by_id(self, obj_id: str):
+        """
+        Get item by object ID (assumes 'id' column exists in DataFrame).
+        """
+        row = self.df.filter(pl.col("id") == obj_id)
+        if row.height == 0:
+            raise KeyError(f"Object ID {obj_id} not found in dataset")
+
+        idx = row[0].to_dict().get("index", None)
+        if idx is None:
+            raise KeyError(f"Index for Object ID {obj_id} not found")
+
+        return self.__getitem__(idx)
