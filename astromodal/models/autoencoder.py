@@ -190,6 +190,33 @@ class Decoder(nn.Module):
         x_hat = self.out_conv(h)      # (B, out_channels, 96, 96)
         return x_hat
 
+def _gaussian_kernel2d(sigma: float, device, dtype):
+    # small, fixed kernel; you can increase k for bigger sigma
+    radius = int(3 * sigma + 0.5)
+    k = 2 * radius + 1
+    x = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
+    g1 = torch.exp(-(x**2) / (2 * sigma**2))
+    g1 = g1 / g1.sum()
+    g2 = g1[:, None] * g1[None, :]
+    g2 = g2 / g2.sum()
+    return g2  # (k,k)
+
+def _gaussian_blur(x, sigma: float):
+    # x: (B,C,H,W)
+    B, C, H, W = x.shape
+    k2 = _gaussian_kernel2d(sigma, x.device, x.dtype)
+    k = k2.shape[0]
+    w = k2.view(1, 1, k, k).repeat(C, 1, 1, 1)  # depthwise
+    return F.conv2d(x, w, padding=k//2, groups=C)
+
+def _laplacian(x):
+    # x: (B,C,H,W) -> (B,C,H,W)
+    B, C, H, W = x.shape
+    k = torch.tensor([[0,  1, 0],
+                    [1, -4, 1],
+                    [0,  1, 0]], device=x.device, dtype=x.dtype)
+    w = k.view(1, 1, 3, 3).repeat(C, 1, 1, 1)  # depthwise
+    return F.conv2d(x, w, padding=1, groups=C)
 
 class AutoEncoder(nn.Module):
     """
@@ -239,13 +266,17 @@ class AutoEncoder(nn.Module):
         z_map, skips = self.encoder(x)
         x_hat = self.decoder(z_map, skips=skips if self.use_skips else None)
         return x_hat, z_map
-    
+
+
 
     def train_epoch(
         self,
         dataloader,
         optimizer,
         device,
+        lam_lowfreq: float = 0.0,
+        lam_points: float = 0.10,
+        sigma_lowfreq: float = 1.5,
     ) -> float:
         self.train()
         total_loss = 0.0
@@ -253,17 +284,33 @@ class AutoEncoder(nn.Module):
 
         for x_norm, m_valid in tqdm(dataloader, desc="Training", leave=False):
             x_norm = x_norm.to(device, non_blocking=True).float()
-            m_valid = m_valid.to(device, non_blocking=True)
+            m_valid = m_valid.to(device, non_blocking=True).float()
 
             optimizer.zero_grad(set_to_none=True)
 
             x_recon, _ = self(x_norm)
 
-            mv = m_valid > 0.5
+            mv = (m_valid > 0.5).unsqueeze(1) if m_valid.ndim == 3 else (m_valid > 0.5)
+            mv = mv.to(x_norm.dtype)
+
+            # --- base recon loss (your original)
             if mv.any():
-                loss = F.mse_loss(x_recon[mv], x_norm[mv])
+                recon = F.mse_loss(x_recon[mv.bool()], x_norm[mv.bool()])
             else:
-                loss = x_recon.sum() * 0.0
+                recon = x_recon.sum() * 0.0
+
+            # --- residual structure regularizers
+            r = (x_recon - x_norm) * mv  # (B,C,H,W)
+
+            # 1) low-frequency structure should be ~0 (noise averages out after blur)
+            r_blur = _gaussian_blur(r, sigma=sigma_lowfreq)
+            lowfreq = (r_blur**2).mean()
+
+            # 2) point-like / sharp structures: laplacian spikes on stars/edges
+            r_lap = _laplacian(r)
+            points = (r_lap**2).mean()
+
+            loss = recon + lam_lowfreq * lowfreq + lam_points * points
 
             loss.backward()
             optimizer.step()
@@ -380,12 +427,13 @@ class AutoEncoder(nn.Module):
     def load_from_file(
         model_input_path: str,
         map_location: Optional[torch.device] = None,
+        use_skips: bool = False,
     ) -> AutoEncoder:
         checkpoint = torch.load(model_input_path, map_location=map_location)
         model = AutoEncoder(
             in_channels=checkpoint.get("in_channels", 12),
             latent_dim=checkpoint.get("latent_dim", 2),
-            use_skips=False,
+            use_skips=use_skips,
         )
         model.load_state_dict(checkpoint["model_state_dict"])
         logpool.info(f"Loaded model from {model_input_path}")

@@ -20,7 +20,7 @@ def main():
     config = load_config("/home/schwarz/projetoFM/config.yaml")
 
     model_path = Path(config["models_folder"]) / "./autoencoder_model_silu.pth"
-    model = AutoEncoder.load_from_file(str(model_path))
+    model = AutoEncoder.load_from_file(str(model_path), use_skips=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)

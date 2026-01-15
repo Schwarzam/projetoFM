@@ -46,11 +46,11 @@ columns = [
 bands = ["F378", "F395", "F410", "F430", "F515", "F660", "F861", "R", "I", "Z", "U", "G"]
 cutout_size = 96
 
-batch_size = 1024
-max_gpu_batch_size = 1024
-num_epochs = 25
+batch_size = 512
+max_gpu_batch_size = 512
+num_epochs = 20
 learning_rate = 1e-3
-latent_dim = 4
+latent_dim = 2
 
 model_output_path = Path(config['models_folder']) / "./autoencoder_model_silu.pth"
 
@@ -124,7 +124,7 @@ if __name__ == '__main__':
     model = AutoEncoder(
         in_channels = len(bands),
         latent_dim = latent_dim,
-        use_skips=True,
+        use_skips=False,
         proj_channels=96
     )
 
