@@ -15,7 +15,7 @@ def main():
     # -----------------------------
     # Configurable variables
     # -----------------------------
-    CONFIG_PATH = "config.yaml"
+    CONFIG_PATH = "/home/schwarz/projetoFM/config.yaml"
     MAX_FILES = 51          # read up to this many parquet files (0..MAX_FILES-1); set None for all
     CHANNELS = 2
     H = 24
