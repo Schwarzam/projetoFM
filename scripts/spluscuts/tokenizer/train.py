@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from astromodal.config import load_config
-from astromodal.tokenizers.resvq import SpatialRVQ
+from astromodal.tokenizers.spatialrvq import SpatialRVQ
 
 
 def main():
