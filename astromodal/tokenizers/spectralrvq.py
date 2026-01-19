@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logpool
 
 class SpectralPatchRVQ(nn.Module):
     """
@@ -150,3 +151,103 @@ class SpectralPatchRVQ(nn.Module):
             loss_sum += float(out["loss"].detach().cpu()) * bs
 
         return {"loss": loss_sum / max(n, 1)}
+    
+
+    def save(self, path: str, additional_info: dict | None = None) -> None:
+        """
+        Save tokenizer + RVQ config/state.
+
+        Stores:
+        - spectralpatchrvq_state_dict (includes rvq parameters if it is a submodule)
+        - patch_size / channels / pad_value
+        - rvq hyperparams when available (dim, R, codebook_size, etc.)
+        - any extra metadata you pass in additional_info
+        """
+        ckpt = {
+            "spectralpatchrvq_state_dict": self.state_dict(),
+            "patch_size": self.patch_size,
+            "channels": self.channels,
+            "pad_value": self.pad_value,
+        }
+
+        # best-effort RVQ config capture (works for most ResidualVQ implementations)
+        rvq = self.rvq
+        rvq_cfg = {}
+        for k in [
+            "dim",
+            "D",
+            "R",
+            "num_stages",
+            "codebook_size",
+            "K",
+            "decay",
+            "eps",
+        ]:
+            if hasattr(rvq, k):
+                v = getattr(rvq, k)
+                # tensors -> python
+                if isinstance(v, torch.Tensor):
+                    v = v.detach().cpu().item() if v.numel() == 1 else v.detach().cpu().tolist()
+                rvq_cfg[k] = v
+        ckpt["rvq_config"] = rvq_cfg
+
+        if additional_info:
+            ckpt.update(additional_info)
+
+        torch.save(ckpt, path)
+        try:
+            logpool.info(f"Saved SpectralPatchRVQ to {path}")
+        except Exception:
+            pass
+
+    @staticmethod
+    def load_from_file(
+        path: str,
+        *,
+        rvq_ctor,
+        map_location=None,
+        strict: bool = True,
+    ) -> "SpectralPatchRVQ":
+        """
+        Load from file.
+
+        You must provide rvq_ctor: a callable that returns a ResidualVQ instance.
+        Example:
+        tok = SpectralPatchRVQ.load_from_file(
+            "tok.pt",
+            rvq_ctor=lambda cfg: ResidualVQ(
+                dim=cfg.get("dim", D),
+                num_stages=cfg.get("num_stages", 2),
+                codebook_size=cfg.get("codebook_size", 2048),
+                decay=cfg.get("decay", 0.99),
+            ),
+            map_location="cpu",
+        )
+
+        Why this design:
+        ResidualVQ class signatures vary; this avoids hard-coding constructor args.
+        """
+        ckpt = torch.load(path, map_location=map_location)
+
+        patch_size = int(ckpt.get("patch_size", 8))
+        channels = int(ckpt.get("channels", 2))
+        pad_value = float(ckpt.get("pad_value", 0.0))
+
+        rvq_cfg = ckpt.get("rvq_config", {})
+        rvq = rvq_ctor(rvq_cfg)
+
+        tok = SpectralPatchRVQ(
+            rvq=rvq,
+            patch_size=patch_size,
+            channels=channels,
+            pad_value=pad_value,
+        )
+
+        tok.load_state_dict(ckpt["spectralpatchrvq_state_dict"], strict=strict)
+
+        try:
+            logpool.info(f"Loaded SpectralPatchRVQ from {path}")
+        except Exception:
+            pass
+
+        return tok

@@ -3,5 +3,5 @@ datacubes_paths: "/home/astrodados4/downloads/hypercube/datacube_*.parquet"
 ## Datacube is the parquet cube generated from legacy/create_cubes.py
 
 
-models_folder: "/home/schwarz/projetoFM/models"
+models_folder: "/home/schwarz/projetoFM/outputs"
 hdd_folder: "/home/astrodados4/downloads/projetin" # actual run storage folder
