@@ -12,9 +12,7 @@ def _gn1d(num_channels: int, num_groups: int = 8) -> nn.GroupNorm:
         g -= 1
     return nn.GroupNorm(g, num_channels)
 
-
 class ConvGNAct1D(nn.Module):
-    """Conv1d -> GroupNorm -> SiLU."""
     def __init__(self, in_ch: int, out_ch: int, k: int = 5, s: int = 1, p: Optional[int] = None):
         super().__init__()
         if p is None:
@@ -26,9 +24,7 @@ class ConvGNAct1D(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(self.gn(self.conv(x)))
 
-
 class ResBlock1D(nn.Module):
-    """Residual block: Conv1d -> GN -> SiLU -> Conv1d -> GN + skip."""
     def __init__(self, channels: int, k: int = 5):
         super().__init__()
         p = k // 2
@@ -43,90 +39,52 @@ class ResBlock1D(nn.Module):
         h = self.gn2(self.conv2(h))
         return self.act(h + x)
 
-
 class SpectraEncoder(nn.Module):
     """
-    Expects x in [B, L, C] and internally converts to [B, C, L].
-
-    Output: z in [B, latent_dim, T]
+    Expects x in [B, L, 1] and returns z in [B, latent_dim, T].
     """
-    def __init__(
-        self,
-        in_channels: int = 2,
-        latent_dim: int = 16,
-        base_channels: int = 64,
-        num_down: int = 4,
-        k: int = 5,
-    ):
+    def __init__(self, in_channels: int = 1, latent_dim: int = 16, base_channels: int = 64, num_down: int = 4, k: int = 5):
         super().__init__()
-        self.in_channels = in_channels
-        self.latent_dim = latent_dim
-        self.base_channels = base_channels
-        self.num_down = num_down
-
         self.proj = nn.Conv1d(in_channels, base_channels, kernel_size=1, bias=True)
 
-        blocks = []
+        blocks: List[nn.Module] = []
         ch = base_channels
         for i in range(num_down):
             blocks += [
                 ResBlock1D(ch, k=k),
-                ConvGNAct1D(ch, ch * 2 if i < num_down - 1 else ch, k=k, s=2),  # stride=2 downsample
+                ConvGNAct1D(ch, ch * 2 if i < num_down - 1 else ch, k=k, s=2),
             ]
             if i < num_down - 1:
-                ch = ch * 2
+                ch *= 2
 
         self.trunk = nn.Sequential(*blocks)
         self.to_latent = nn.Conv1d(ch, latent_dim, kernel_size=1, bias=True)
-
         self.downsample_factor = 2 ** num_down
 
     def forward(self, x_blc: torch.Tensor) -> torch.Tensor:
-        # x_blc: [B,L,C] -> [B,C,L]
         if x_blc.ndim != 3:
-            raise ValueError(f"Expected x [B,L,C], got {tuple(x_blc.shape)}")
-        x = x_blc.transpose(1, 2).contiguous()
+            raise ValueError(f"Expected x [B,L,1], got {tuple(x_blc.shape)}")
+        x = x_blc.transpose(1, 2).contiguous()  # [B,1,L] -> conv layout
         h = self.proj(x)
         h = self.trunk(h)
         z = self.to_latent(h)
         return z
 
-
 class SpectraDecoder(nn.Module):
     """
-    Input:  z [B, latent_dim, T]
-    Output: x_hat [B, C, Lhat]  (Conv1d layout)
+    z [B, latent_dim, T] -> x_hat [B, 1, Lhat]
     """
-    def __init__(
-        self,
-        out_channels: int = 2,
-        latent_dim: int = 16,
-        base_channels: int = 64,
-        num_down: int = 4,
-        k: int = 5,
-    ):
+    def __init__(self, out_channels: int = 1, latent_dim: int = 16, base_channels: int = 64, num_down: int = 4, k: int = 5):
         super().__init__()
-        self.out_channels = out_channels
-        self.latent_dim = latent_dim
-        self.base_channels = base_channels
-        self.num_down = num_down
-
         ch = base_channels * (2 ** (num_down - 1)) if num_down > 1 else base_channels
         self.from_latent = nn.Conv1d(latent_dim, ch, kernel_size=1, bias=True)
 
-        blocks = []
+        blocks: List[nn.Module] = []
         for i in range(num_down):
             next_ch = ch // 2 if i < num_down - 1 else base_channels
             blocks += [
                 ResBlock1D(ch, k=k),
-                nn.ConvTranspose1d(
-                    ch,
-                    next_ch,
-                    kernel_size=4,
-                    stride=2,
-                    padding=1,
-                    bias=True,
-                ),
+                nn.ConvTranspose1d(ch, next_ch, kernel_size=4, stride=2, padding=1, bias=True),
                 _gn1d(next_ch),
                 nn.SiLU(inplace=True),
             ]
@@ -138,49 +96,28 @@ class SpectraDecoder(nn.Module):
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         h = self.from_latent(z)
         h = self.trunk(h)
-        x_hat = self.out_conv(h)  # [B,C,Lhat]
-        return x_hat
-
+        return self.out_conv(h)
 
 class SpectraAutoEncoder(nn.Module):
     """
-    Public interface matches your loader:
+    Flux-only AE.
+      Input:  x [B, L, 1] (normalized flux)
+      Output: x_hat [B, L, 1] (normalized flux)
 
-      Input x:  [B, L, 2]
-      Output:   [B, L, 2]
-
-    mask from loader:
-      mask: [B, L]  (bool)
+    Training uses:
+      mask [B,L] bool
+      w    [B,L] float (weights derived from ivar; zeros for invalid)
     """
-    def __init__(
-        self,
-        in_channels: int = 2,
-        latent_dim: int = 16,
-        base_channels: int = 64,
-        num_down: int = 4,
-        k: int = 5,
-    ):
+    def __init__(self, latent_dim: int = 16, base_channels: int = 64, num_down: int = 4, k: int = 5):
         super().__init__()
-        self.in_channels = in_channels
+        self.in_channels = 1
         self.latent_dim = latent_dim
         self.base_channels = base_channels
         self.num_down = num_down
         self.k = k
 
-        self.encoder = SpectraEncoder(
-            in_channels=in_channels,
-            latent_dim=latent_dim,
-            base_channels=base_channels,
-            num_down=num_down,
-            k=k,
-        )
-        self.decoder = SpectraDecoder(
-            out_channels=in_channels,
-            latent_dim=latent_dim,
-            base_channels=base_channels,
-            num_down=num_down,
-            k=k,
-        )
+        self.encoder = SpectraEncoder(in_channels=1, latent_dim=latent_dim, base_channels=base_channels, num_down=num_down, k=k)
+        self.decoder = SpectraDecoder(out_channels=1, latent_dim=latent_dim, base_channels=base_channels, num_down=num_down, k=k)
 
         self.downsample_factor = self.encoder.downsample_factor
         self.apply(self._init_weights)
@@ -193,52 +130,52 @@ class SpectraAutoEncoder(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B,L,C]
         return self.encoder(x)
 
     def decode(self, z: torch.Tensor, L_out: Optional[int] = None) -> torch.Tensor:
-        # decoder returns [B, 2, L']
-        x_hat = self.decoder(z)
+        x_hat = self.decoder(z)  # [B,1,Lhat]
         Lh = x_hat.shape[-1]
-
         if L_out is not None:
             if Lh > L_out:
                 x_hat = x_hat[..., :L_out]
             elif Lh < L_out:
                 x_hat = F.pad(x_hat, (0, L_out - Lh))
-
-        # ALWAYS return [B, L, 2]
-        return x_hat.transpose(1, 2).contiguous()
+        return x_hat.transpose(1, 2).contiguous()  # [B,L,1]
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        z = self.encode(x)                 # [B,latent_dim,T]
-        x_hat = self.decode(z, L_out=x.shape[1])  # [B,L,C]
+        z = self.encode(x)
+        x_hat = self.decode(z, L_out=x.shape[1])
         return x_hat, z
-
-    # -------------------------
-    # Loss + training (FIXED)
-    # -------------------------
 
     def compute_loss(
         self,
-        x: torch.Tensor,                    # [B, L, 2]
-        mask: Optional[torch.Tensor] = None # [B, L] bool (True=valid)
+        x: torch.Tensor,                      # [B,L,1]
+        mask: Optional[torch.Tensor] = None,  # [B,L] bool
+        w: Optional[torch.Tensor] = None,     # [B,L] float (weights)
     ) -> torch.Tensor:
-        x_hat, _ = self(x)                  # x_hat: [B, L, 2]
+        x_hat, _ = self(x)
 
-        if mask is None:
+        if mask is None and w is None:
             return F.mse_loss(x_hat, x)
 
-        # mask: [B,L] -> [B,L,1] and broadcast over channels
-        m = mask.to(dtype=torch.bool, device=x.device).unsqueeze(-1)   # [B,L,1]
-        m_f = m.to(dtype=x.dtype)                                      # float for math
+        # valid mask
+        if mask is None:
+            m = torch.isfinite(x[..., 0])
+        else:
+            m = mask.to(dtype=torch.bool, device=x.device)
 
-        diff2 = (x_hat - x).pow(2)                                     # [B,L,2]
-        num = (diff2 * m_f).sum()                                      # sum over valid pixels & channels
-        den = m_f.sum() * x.shape[-1]                                  # valid_pixels * channels
+        # weights
+        if w is None:
+            ww = m.to(dtype=x.dtype, device=x.device)  # uniform weights on valid
+        else:
+            ww = w.to(dtype=x.dtype, device=x.device)
+            ww = ww * m.to(dtype=x.dtype)
 
-        # avoid div0 if a batch is fully masked
-        return num / (den.clamp_min(1.0))
+        # compute weighted MSE on flux channel
+        diff2 = (x_hat - x).pow(2)[..., 0]  # [B,L]
+        num = (diff2 * ww).sum()
+        den = ww.sum().clamp_min(1e-6)
+        return num / den
 
     def train_epoch(self, dataloader, optimizer, device) -> float:
         self.train()
@@ -246,19 +183,18 @@ class SpectraAutoEncoder(nn.Module):
         n = 0
 
         for batch in tqdm(dataloader, desc="Training", leave=False):
-            # your collate returns (x_pad, mask_pad, lengths)
-            if isinstance(batch, (tuple, list)) and len(batch) == 3:
-                x, mask, _lengths = batch
-            elif isinstance(batch, (tuple, list)) and len(batch) == 2:
-                x, mask = batch
+            # batch: (x, mask, w, lengths, [stats])
+            if isinstance(batch, (tuple, list)) and (len(batch) == 5 or len(batch) == 6):
+                x, mask, w, lengths = batch[0], batch[1], batch[2], batch[3]
             else:
-                x, mask = batch, None
+                raise ValueError("Expected batch from desi_collate_pad_flux_only")
 
-            x = x.to(device, non_blocking=True).float()         # [B,L,2]
-            mask = mask.to(device, non_blocking=True) if mask is not None else None
+            x = x.to(device, non_blocking=True).float()
+            mask = mask.to(device, non_blocking=True)
+            w = w.to(device, non_blocking=True).float()
 
             optimizer.zero_grad(set_to_none=True)
-            loss = self.compute_loss(x, mask=mask)
+            loss = self.compute_loss(x, mask=mask, w=w)
             loss.backward()
             optimizer.step()
 
@@ -275,17 +211,16 @@ class SpectraAutoEncoder(nn.Module):
         n = 0
 
         for batch in tqdm(dataloader, desc="Validating", leave=False):
-            if isinstance(batch, (tuple, list)) and len(batch) == 3:
-                x, mask, _lengths = batch
-            elif isinstance(batch, (tuple, list)) and len(batch) == 2:
-                x, mask = batch
+            if isinstance(batch, (tuple, list)) and (len(batch) == 5 or len(batch) == 6):
+                x, mask, w, lengths = batch[0], batch[1], batch[2], batch[3]
             else:
-                x, mask = batch, None
+                raise ValueError("Expected batch from desi_collate_pad_flux_only")
 
             x = x.to(device, non_blocking=True).float()
-            mask = mask.to(device, non_blocking=True) if mask is not None else None
+            mask = mask.to(device, non_blocking=True)
+            w = w.to(device, non_blocking=True).float()
 
-            loss = self.compute_loss(x, mask=mask)
+            loss = self.compute_loss(x, mask=mask, w=w)
 
             bs = x.shape[0]
             total += float(loss.detach().cpu()) * bs
@@ -297,7 +232,6 @@ class SpectraAutoEncoder(nn.Module):
         torch.save(
             {
                 "model_state_dict": self.state_dict(),
-                "in_channels": self.in_channels,
                 "latent_dim": self.latent_dim,
                 "base_channels": self.base_channels,
                 "num_down": self.num_down,
@@ -311,12 +245,11 @@ class SpectraAutoEncoder(nn.Module):
     def load_from_file(path: str, map_location=None) -> "SpectraAutoEncoder":
         ckpt = torch.load(path, map_location=map_location)
         model = SpectraAutoEncoder(
-            in_channels=ckpt.get("in_channels", 2),
             latent_dim=ckpt.get("latent_dim", 16),
             base_channels=ckpt.get("base_channels", 64),
             num_down=ckpt.get("num_down", 4),
             k=ckpt.get("k", 5),
         )
         model.load_state_dict(ckpt["model_state_dict"])
-        logpool.info(f"Loaded spectra AE from {path}")
+        logpool.info(f"Loaded spectra AE (flux-only) from {path}")
         return model
