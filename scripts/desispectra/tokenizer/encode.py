@@ -52,6 +52,24 @@ TRAIN_VAL_SPLIT = 0.9
 NFILES_SUBSAMPLE = None
 # =============================================================================
 
+from astromodal.tokenizers.rvq import ResidualVQ
+
+def make_rvq(cfg: dict):
+    """
+    Rebuild ResidualVQ exactly as used during training.
+    cfg comes from the checkpoint.
+    """
+    # dim is mandatory
+    dim = cfg.get("dim", cfg.get("D", None))
+    if dim is None:
+        raise ValueError("RVQ config missing 'dim'")
+
+    return ResidualVQ(
+        dim=int(dim),
+        num_stages=int(cfg.get("num_stages", 3)),
+        codebook_size=int(cfg.get("codebook_size", 1024)),
+        decay=float(cfg.get("decay", 0.99)),
+    )
 
 def _infer_out_path(infile: Path, out_root: Path) -> Path:
     out_root.mkdir(parents=True, exist_ok=True)
@@ -130,7 +148,7 @@ def main():
 
     # Load tokenizer
     tok_path = Path(TOK_PATH) if TOK_PATH else Path(config["models_folder"]) / TOK_NAME_DEFAULT
-    tok = SpectralPatchRVQ.load_from_file(tok_path, map_location=DEVICE)
+    tok = SpectralPatchRVQ.load_from_file(tok_path, rvq_ctor=make_rvq, map_location=DEVICE)
     tok.eval().to(DEVICE)
 
     # Decide which latent files to process

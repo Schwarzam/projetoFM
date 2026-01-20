@@ -3,6 +3,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logpool
 
+from astromodal.tokenizers.rvq import ResidualVQ
+
+def make_rvq(cfg: dict):
+    """
+    Rebuild ResidualVQ exactly as used during training.
+    cfg comes from the checkpoint.
+    """
+    # dim is mandatory
+    dim = cfg.get("dim", cfg.get("D", None))
+    if dim is None:
+        raise ValueError("RVQ config missing 'dim'")
+
+    return ResidualVQ(
+        dim=int(dim),
+        num_stages=int(cfg.get("num_stages", 3)),
+        codebook_size=int(cfg.get("codebook_size", 1024)),
+        decay=float(cfg.get("decay", 0.99)),
+    )
+
 class SpectralPatchRVQ(nn.Module):
     """
     Patch-tokenize a 1D spectrum with features (flux, ivar) and apply ResidualVQ.
@@ -204,7 +223,7 @@ class SpectralPatchRVQ(nn.Module):
     def load_from_file(
         path: str,
         *,
-        rvq_ctor,
+        rvq_ctor=lambda cfg: make_rvq(cfg),
         map_location=None,
         strict: bool = True,
     ) -> "SpectralPatchRVQ":
