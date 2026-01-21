@@ -35,6 +35,9 @@ WEIGHT_DECAY = 1e-3
 EPOCHS = 10
 
 MODEL_OUT_NAME = "spectra_autoencoder_desi.pth"
+
+SCALER_PATH = Path("scalers") / "desi_flux_standard_scaler.npz"
+
 # =============================================================================
 
 
@@ -84,7 +87,8 @@ def main():
     val_df = val_df.filter(pl.col("desi_TARGET_RA").is_not_null())
 
     # Dataloaders
-    ds_train = DesiStitchedFluxOnlyDataset(train_df, return_stats=True)
+    scaler_path = Path(config["models_folder"]) / "scalers" / "desi_flux_standard_scaler.npz"
+    ds_train = DesiStitchedFluxOnlyDataset(train_df, scaler_path=scaler_path)
     dl_train = DataLoader(
         ds_train,
         batch_size=BATCH_SIZE,
@@ -94,7 +98,7 @@ def main():
         pin_memory=True,
     )
 
-    ds_val = DesiStitchedFluxOnlyDataset(val_df, return_stats=True)
+    ds_val = DesiStitchedFluxOnlyDataset(val_df, scaler_path=scaler_path)
     dl_val = DataLoader(
         ds_val,
         batch_size=BATCH_SIZE,

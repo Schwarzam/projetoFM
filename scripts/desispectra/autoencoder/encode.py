@@ -37,6 +37,10 @@ TRAIN_VAL_SPLIT = 0.9
 
 # Filtering (keep consistent with training if you want)
 MAG_R_MAX = 21
+
+
+SCALER_PATH = Path("scalers") / "desi_flux_standard_scaler.npz"
+
 # =============================================================================
 
 
@@ -70,7 +74,7 @@ def encode_one_file(
     if len(desi_cols) == 0 or df.height == 0:
         return pl.DataFrame({"id": [], "latent": []})
 
-    ds = DesiStitchedFluxOnlyDataset(df, return_stats=False)
+    ds = DesiStitchedFluxOnlyDataset(df, scaler_path=Path(load_config(CONFIG_PATH)["models_folder"]) / SCALER_PATH)
 
     dl = DataLoader(
         ds,

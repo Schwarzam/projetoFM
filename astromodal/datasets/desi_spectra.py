@@ -10,86 +10,9 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 
 from typing import Optional, Any
+from pathlib import Path
 
-@dataclass
-class NormStats:
-    mu: float
-    sigma: float
-
-def robust_flux_stats(flux: np.ndarray, mask: np.ndarray, eps: float = 1e-6) -> NormStats:
-    """
-    Robust per-spectrum stats using median + MAD.
-    flux: [L]
-    mask: [L] bool (True valid pixel)
-    """
-    v = flux[mask] if mask is not None else flux
-    v = v[np.isfinite(v)]
-    if v.size == 0:
-        return NormStats(mu=0.0, sigma=1.0)
-
-    mu = float(np.median(v))
-    mad = float(np.median(np.abs(v - mu)))
-    sigma = 1.4826 * mad  # MAD -> ~sigma for normal
-    if not np.isfinite(sigma) or sigma < eps:
-        # fallback to std
-        sigma2 = float(np.std(v))
-        sigma = sigma2 if (np.isfinite(sigma2) and sigma2 >= eps) else 1.0
-
-    return NormStats(mu=mu, sigma=sigma)
-
-def normalize_flux(flux: np.ndarray, stats: NormStats) -> np.ndarray:
-    return (flux - stats.mu) / (stats.sigma + 1e-12)
-
-def denormalize_flux(flux_norm: np.ndarray, stats: NormStats) -> np.ndarray:
-    return flux_norm * stats.sigma + stats.mu
-
-def ivar_to_weights_for_normalized_flux(
-    ivar: np.ndarray,
-    stats: NormStats,
-    mask: np.ndarray,
-    *,
-    use_sqrt: bool = True,
-    w_clip_quantile: float = 0.995,
-    eps: float = 1e-12
-) -> np.ndarray:
-    """
-    If f' = (f - mu)/sigma, then ivar' = ivar * sigma^2.
-
-    We then optionally use sqrt(ivar') to reduce domination by very high ivar,
-    and clip weights at a high quantile among valid pixels.
-    """
-    if ivar.size == 0:
-        return np.zeros_like(ivar, dtype=np.float32)
-
-    iv = np.asarray(ivar, dtype=np.float64)
-    m = np.asarray(mask, dtype=bool)
-
-    # scale to match normalized flux units
-    iv_scaled = iv * (stats.sigma ** 2)
-
-    # valid weights: finite and >0 and valid pixel
-    w = np.zeros_like(iv_scaled, dtype=np.float64)
-    good = m & np.isfinite(iv_scaled) & (iv_scaled > 0)
-    if np.any(good):
-        w_good = iv_scaled[good]
-
-        if use_sqrt:
-            w_good = np.sqrt(w_good)
-
-        # clip extreme weights (optional but recommended)
-        if 0.0 < w_clip_quantile < 1.0:
-            cap = np.quantile(w_good, w_clip_quantile)
-            if np.isfinite(cap) and cap > eps:
-                w_good = np.minimum(w_good, cap)
-
-        w[good] = w_good
-
-    return w.astype(np.float32)
-
-
-# -------------------------
-# Stitching (your code, unchanged)
-# -------------------------
+from astromodal.models.scaler1d import StandardScaler1D
 
 def _as_1d_float(x) -> np.ndarray:
     if x is None:
@@ -175,25 +98,27 @@ def stitch_desi_arms(
 class DesiStitchedFluxOnlyDataset(torch.utils.data.Dataset):
     """
     Returns:
-      x    : float32 [L, 1]  (normalized flux)
-      mask : bool    [L]     (valid pixel)
-      w    : float32 [L]     (loss weights; derived from ivar; zero for invalid)
-      stats: float32 [2]     (mu, sigma) optional, useful for denorm/debug
+      x    : float32 [L, 1]  (GLOBAL standardized flux)
+      mask : bool    [L]
+      w    : float32 [L]     (loss weights derived from ivar; zero for invalid)
     """
 
     def __init__(
         self,
         df,
         *,
-        return_stats: bool = True,
+        scaler_path: str | Path,
         use_sqrt_weights: bool = True,
         w_clip_quantile: float = 0.995,
     ):
         self.df = df
-        self.return_stats = return_stats
+        self.scaler_path = Path(scaler_path)
         self.use_sqrt_weights = use_sqrt_weights
         self.w_clip_quantile = w_clip_quantile
 
+        if self.scaler_path.exists():
+            self.scaler = StandardScaler1D.load(self.scaler_path)
+            
     def __len__(self):
         return self.df.height
 
@@ -206,41 +131,39 @@ class DesiStitchedFluxOnlyDataset(torch.utils.data.Dataset):
             row.get("desi_wave_z"), row.get("desi_flux_z"), row.get("desi_ivar_z"),
         )
 
-        # If empty: return dummy length-1, fully invalid
         if f.size == 0:
             x = np.zeros((1, 1), dtype=np.float32)
             mask = np.zeros((1,), dtype=np.bool_)
             w = np.zeros((1,), dtype=np.float32)
-            if self.return_stats:
-                stats = np.array([0.0, 1.0], dtype=np.float32)
-                return torch.from_numpy(x), torch.from_numpy(mask), torch.from_numpy(w), torch.from_numpy(stats)
             return torch.from_numpy(x), torch.from_numpy(mask), torch.from_numpy(w)
 
         mask = m.astype(bool)
 
-        # robust per-spectrum normalization on VALID pixels
-        stats = robust_flux_stats(f, mask)
-        f_norm = normalize_flux(f, stats).astype(np.float32)
+        # global standardization (optionally asinh inside scaler)
+        f_norm = self.scaler.transform_x(f).astype(np.float32)
 
-        # weights from ivar scaled into normalized units
-        w_loss = ivar_to_weights_for_normalized_flux(
-            iv,
-            stats,
-            mask,
-            use_sqrt=self.use_sqrt_weights,
-            w_clip_quantile=self.w_clip_quantile,
-        )  # [L] float32, already zeroed where invalid
+        # weights from ivar (NOT scaled by per-spectrum sigma anymore)
+        w_loss = np.zeros_like(f, dtype=np.float64)
+        good = mask & np.isfinite(iv) & (iv > 0)
+        if np.any(good):
+            ww = iv[good].astype(np.float64)
+            if self.use_sqrt_weights:
+                ww = np.sqrt(ww)
+
+            # clip extremes
+            if 0.0 < self.w_clip_quantile < 1.0:
+                cap = np.quantile(ww, self.w_clip_quantile)
+                if np.isfinite(cap) and cap > 1e-12:
+                    ww = np.minimum(ww, cap)
+
+            w_loss[good] = ww
 
         x = f_norm[:, None]  # [L,1]
-        if self.return_stats:
-            stats_arr = np.array([stats.mu, stats.sigma], dtype=np.float32)
-            return (torch.from_numpy(x),
-                    torch.from_numpy(mask),
-                    torch.from_numpy(w_loss),
-                    torch.from_numpy(stats_arr))
-        return (torch.from_numpy(x),
-                torch.from_numpy(mask),
-                torch.from_numpy(w_loss))
+        return (
+            torch.from_numpy(x),
+            torch.from_numpy(mask),
+            torch.from_numpy(w_loss.astype(np.float32)),
+        )
 
 
 def desi_collate_pad_flux_only(batch, pad_x: float = 0.0):
