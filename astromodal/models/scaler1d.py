@@ -27,18 +27,12 @@ class StandardScaler1D:
         return y
 
     def transform_x(self, x: np.ndarray) -> np.ndarray:
-        x = np.asarray(x, dtype=np.float32)
-        sigma = float(self.std)
-        if not np.isfinite(sigma) or sigma < 1e-6:
-            sigma = 1.0
-        return (x - float(self.mean)) / sigma
+        y = self._pre(x)
+        return (y - self.mean) / (self.std + 1e-12)
 
-    def inverse_transform_x(self, x: np.ndarray) -> np.ndarray:
-        x = np.asarray(x, dtype=np.float32)
-        sigma = float(self.std)
-        if not np.isfinite(sigma) or sigma < 1e-6:
-            sigma = 1.0
-        return x * sigma + float(self.mean)
+    def inverse_transform_x(self, x_norm: np.ndarray) -> np.ndarray:
+        y = x_norm * self.std + self.mean
+        return self._inv_pre(y)
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
