@@ -21,6 +21,21 @@ def make_rvq(cfg: dict):
         codebook_size=int(cfg.get("codebook_size", 1024)),
         decay=float(cfg.get("decay", 0.99)),
     )
+    
+def _weighted_mse(x_q: torch.Tensor, x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    x_q, x: [B, L, C]
+    w:      [B, L] or [B, L, 1]
+    Computes sum(w * (x_q-x)^2) / sum(w) over valid positions.
+    """
+    if w.ndim == 2:
+        w = w.unsqueeze(-1)  # [B,L,1]
+    w = w.to(dtype=x.dtype, device=x.device)
+
+    diff2 = (x_q - x) ** 2  # [B,L,C]
+    num = (diff2 * w).sum()
+    den = w.sum().clamp_min(eps)
+    return num / den
 
 class SpectralPatchRVQ(nn.Module):
     """
@@ -124,25 +139,44 @@ class SpectralPatchRVQ(nn.Module):
         x_q = self.unpatchify(tok_q, B, T, L)                        # [B,L,C]
         return x_q
 
-    def compute_loss(self, x: torch.Tensor, update_ema: bool = True, mask: torch.Tensor | None = None):
+    def compute_loss(
+        self,
+        x: torch.Tensor,
+        update_ema: bool = True,
+        mask: torch.Tensor | None = None,
+        w: torch.Tensor | None = None,
+    ):
         """
-        x: [B,L,C]
-        mask: optional [B,L] boolean (True = valid). If provided, loss uses only valid samples.
+        x:    [B,L,C]
+        mask: optional [B,L] bool (True=valid)
+        w:    optional [B,L] float weights (0 for invalid)
         """
         tok, L_orig, Lp, T = self.patchify(x)
         out = self.rvq(tok, update_ema=update_ema)
-        tok_q = out["z_q"]
-        x_q = self.unpatchify(tok_q, x.shape[0], T, L_orig)
 
-        if mask is not None:
-            # mask: [B,L] -> [B,L,1] broadcast over C
-            m = mask.to(dtype=torch.bool, device=x.device).unsqueeze(-1)
-            if m.any():
-                loss = F.mse_loss(x_q[m], x[m])
+        tok_q = out["z_q"]
+        x_q = self.unpatchify(tok_q, x.shape[0], T, L_orig)  # [B,L,C]
+
+        # ----- build effective weights -----
+        if w is None and mask is None:
+            loss = F.mse_loss(x_q, x)
+        else:
+            # start with w if provided, else uniform
+            if w is None:
+                ww = torch.ones((x.shape[0], L_orig), device=x.device, dtype=x.dtype)
+            else:
+                ww = w.to(device=x.device, dtype=x.dtype)
+
+            # apply mask if provided
+            if mask is not None:
+                mm = mask.to(device=x.device, dtype=torch.bool)
+                ww = ww * mm.to(dtype=x.dtype)
+
+            # if all weights are 0, return 0 safely
+            if torch.any(ww > 0):
+                loss = _weighted_mse(x_q, x, ww)
             else:
                 loss = x_q.sum() * 0.0
-        else:
-            loss = F.mse_loss(x_q, x)
 
         return {
             "loss": loss,
@@ -156,15 +190,27 @@ class SpectralPatchRVQ(nn.Module):
         if device is not None:
             self.to(device)
 
-        dev = self.rvq.embed.device  # works even if rvq has only buffers
+        dev = self.rvq.embed.device
         n = 0
         loss_sum = 0.0
 
         for batch in dataloader:
-            x = batch[0] if isinstance(batch, (tuple, list)) else batch
-            x = x.to(dev, non_blocking=True).float()
+            # retro-compatible parsing
+            if isinstance(batch, (tuple, list)):
+                x = batch[0]
+                mask = batch[1] if len(batch) > 1 else None
+                w = batch[2] if len(batch) > 2 else None
+            else:
+                x, mask, w = batch, None, None
 
-            out = self.compute_loss(x, update_ema=update_ema, mask=None)
+            x = x.to(dev, non_blocking=True).float()
+            if mask is not None:
+                mask = mask.to(dev, non_blocking=True)
+            if w is not None:
+                w = w.to(dev, non_blocking=True).float()
+
+            out = self.compute_loss(x, update_ema=update_ema, mask=mask, w=w)
+
             bs = x.shape[0]
             n += bs
             loss_sum += float(out["loss"].detach().cpu()) * bs

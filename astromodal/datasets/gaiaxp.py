@@ -7,33 +7,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-
-# -----------------------------
-# Robust per-spectrum normalization
-# -----------------------------
-@dataclass
-class FluxStats:
-    mu: float
-    sigma: float
-
-def robust_flux_stats(flux: np.ndarray, mask: np.ndarray, eps: float = 1e-6) -> FluxStats:
-    v = flux[mask]
-    v = v[np.isfinite(v)]
-    if v.size == 0:
-        return FluxStats(0.0, 1.0)
-    mu = float(np.median(v))
-    mad = float(np.median(np.abs(v - mu)))
-    sigma = 1.4826 * mad
-    if (not np.isfinite(sigma)) or (sigma < eps):
-        s2 = float(np.std(v))
-        sigma = s2 if (np.isfinite(s2) and s2 >= eps) else 1.0
-    return FluxStats(mu, sigma)
-
-def normalize_flux(flux: np.ndarray, stats: FluxStats) -> np.ndarray:
-    return (flux - stats.mu) / (stats.sigma + 1e-12)
-
-def denormalize_flux(flux_norm: np.ndarray, stats: FluxStats) -> np.ndarray:
-    return flux_norm * (stats.sigma + 1e-12) + stats.mu
+from astromodal.models.scaler1d import StandardScaler1D
+from pathlib import Path
 
 def error_to_weights(err: np.ndarray, mask: np.ndarray, clip_p99: float = 0.99) -> np.ndarray:
     """
@@ -75,7 +50,7 @@ def _as_1d_float(x: Any) -> np.ndarray:
 # -----------------------------
 # Dataset
 # -----------------------------
-class GaiaXPCalibratedFluxOnlyDataset(Dataset):
+class GaiaXPCalibratedDataset(Dataset):
     """
     Expects a Polars DF where each row has:
       - flux_col: list/array of calibrated GaiaXP flux samples
@@ -89,6 +64,7 @@ class GaiaXPCalibratedFluxOnlyDataset(Dataset):
     def __init__(
         self,
         df,
+        scaler_path = None,
         flux_col: str = "xp_flux",
         err_col: str = "xp_flux_error",
         return_stats: bool = False,
@@ -97,6 +73,10 @@ class GaiaXPCalibratedFluxOnlyDataset(Dataset):
         self.flux_col = flux_col
         self.err_col = err_col
         self.return_stats = bool(return_stats)
+        
+        self.scaler = StandardScaler1D(mean=0.0, std=1.0)
+        if scaler_path and Path(scaler_path).exists():
+            self.scaler = StandardScaler1D.load(scaler_path)
 
     def __len__(self) -> int:
         return self.df.height
@@ -108,26 +88,17 @@ class GaiaXPCalibratedFluxOnlyDataset(Dataset):
         e = _as_1d_float(row.get(self.err_col))
 
         L = min(f.size, e.size)
-        if L == 0:
-            x = np.zeros((1, 1), dtype=np.float32)
-            mask = np.zeros((1,), dtype=np.bool_)
-            w = np.zeros((1,), dtype=np.float32)
-            if self.return_stats:
-                return torch.from_numpy(x), torch.from_numpy(mask), torch.from_numpy(w), FluxStats(0.0, 1.0)
-            return torch.from_numpy(x), torch.from_numpy(mask), torch.from_numpy(w)
 
         f = f[:L].astype(np.float64, copy=False)
         e = e[:L].astype(np.float64, copy=False)
 
         mask = np.isfinite(f) & np.isfinite(e) & (e > 0)
-        stats = robust_flux_stats(f, mask)
-        f_norm = normalize_flux(f, stats).astype(np.float32)
+        
+        f_norm = self.scaler.transform_x(f)
 
         x = f_norm[:, None]  # [L,1]
         w = error_to_weights(e, mask)  # [L]
 
-        if self.return_stats:
-            return torch.from_numpy(x), torch.from_numpy(mask.astype(np.bool_)), torch.from_numpy(w), stats
         return torch.from_numpy(x), torch.from_numpy(mask.astype(np.bool_)), torch.from_numpy(w)
 
 
@@ -184,7 +155,7 @@ def make_gaiaxp_dataloader(
     pin_memory: bool = True,
     return_stats: bool = False,
 ):
-    ds = GaiaXPCalibratedFluxOnlyDataset(
+    ds = GaiaXPCalibratedDataset(
         df,
         flux_col=flux_col,
         err_col=err_col,

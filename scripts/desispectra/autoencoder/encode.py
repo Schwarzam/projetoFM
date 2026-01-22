@@ -10,7 +10,7 @@ import torch
 
 from astromodal.datasets.datacubes import load_datacube_files
 from astromodal.models.spectral_autoencoder import SpectraAutoEncoder
-from astromodal.datasets.desi_spectra import DesiStitchedFluxOnlyDataset, desi_collate_pad_flux_only
+from astromodal.datasets.desi_spectra import DesiSpectraDataset, desi_collate_pad_flux_only
 from torch.utils.data import DataLoader
 
 
@@ -74,7 +74,7 @@ def encode_one_file(
     if len(desi_cols) == 0 or df.height == 0:
         return pl.DataFrame({"id": [], "latent": []})
 
-    ds = DesiStitchedFluxOnlyDataset(df, scaler_path=Path(load_config(CONFIG_PATH)["models_folder"]) / SCALER_PATH)
+    ds = DesiSpectraDataset(df, scaler_path=Path(load_config(CONFIG_PATH)["models_folder"]) / SCALER_PATH)
 
     dl = DataLoader(
         ds,

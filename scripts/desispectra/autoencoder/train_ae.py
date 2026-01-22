@@ -8,7 +8,7 @@ from pathlib import Path
 from astromodal.datasets.datacubes import load_datacube_files
 
 from astromodal.models.spectral_autoencoder import SpectraAutoEncoder
-from astromodal.datasets.desi_spectra import DesiStitchedFluxOnlyDataset, desi_collate_pad_flux_only
+from astromodal.datasets.desi_spectra import DesiSpectraDataset, desi_collate_pad_flux_only
 from torch.utils.data import DataLoader
 import torch
 
@@ -88,7 +88,7 @@ def main():
 
     # Dataloaders
     scaler_path = Path(config["models_folder"]) / "scalers" / "desi_flux_standard_scaler.npz"
-    ds_train = DesiStitchedFluxOnlyDataset(train_df, scaler_path=scaler_path)
+    ds_train = DesiSpectraDataset(train_df, scaler_path=scaler_path)
     dl_train = DataLoader(
         ds_train,
         batch_size=BATCH_SIZE,
@@ -98,7 +98,7 @@ def main():
         pin_memory=True,
     )
 
-    ds_val = DesiStitchedFluxOnlyDataset(val_df, scaler_path=scaler_path)
+    ds_val = DesiSpectraDataset(val_df, scaler_path=scaler_path)
     dl_val = DataLoader(
         ds_val,
         batch_size=BATCH_SIZE,

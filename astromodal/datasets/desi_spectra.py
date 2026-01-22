@@ -95,7 +95,7 @@ def stitch_desi_arms(
 # Dataset: returns flux only + mask + weights (from ivar)
 # -------------------------
 
-class DesiStitchedFluxOnlyDataset(torch.utils.data.Dataset):
+class DesiSpectraDataset(torch.utils.data.Dataset):
     """
     Returns:
       x    : float32 [L, 1]  (GLOBAL standardized flux)
