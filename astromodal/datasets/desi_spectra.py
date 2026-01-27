@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional, Any
 from pathlib import Path
 
-from astromodal.models.scaler1d import StandardScaler1D
+from astromodal.scalers.scaler1d import StandardScaler1D
 
 def _as_1d_float(x) -> np.ndarray:
     if x is None:

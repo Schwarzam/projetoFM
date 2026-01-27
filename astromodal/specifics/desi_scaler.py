@@ -1,5 +1,5 @@
 from astromodal.datasets.desi_spectra import stitch_desi_arms
-from astromodal.models.scaler1d import StandardScaler1D
+from astromodal.scalers.scaler1d import StandardScaler1D
 
 from typing import Optional
 import numpy as np

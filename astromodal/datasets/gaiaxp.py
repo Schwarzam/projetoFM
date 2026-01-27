@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from astromodal.models.scaler1d import StandardScaler1D
+from astromodal.scalers.scaler1d import StandardScaler1D
 from pathlib import Path
 
 def error_to_weights(err: np.ndarray, mask: np.ndarray, clip_p99: float = 0.99) -> np.ndarray:

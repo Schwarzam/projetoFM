@@ -116,3 +116,39 @@ class ResidualVQ(nn.Module):
             "usage": usage,
         }
 
+    @torch.no_grad()
+    def encode(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Encode vectors into discrete RVQ codes.
+
+        Parameters
+        ----------
+        z : torch.Tensor
+            Shape [B, D]
+
+        Returns
+        -------
+        codes : torch.Tensor
+            Shape [B, R], dtype long
+        """
+        self.eval()
+        out = self.forward(z, update_ema=False)
+        return out["codes"]
+
+    @torch.no_grad()
+    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+        """
+        Decode RVQ codes back to vectors.
+
+        Parameters
+        ----------
+        codes : torch.Tensor
+            Shape [B, R], dtype long
+
+        Returns
+        -------
+        z_q : torch.Tensor
+            Shape [B, D]
+        """
+        self.eval()
+        return self.decode_codes(codes)
