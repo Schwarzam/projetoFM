@@ -512,7 +512,7 @@ def parse_args():
     ap.add_argument("--ema_epochs", type=int, default=10)
     ap.add_argument("--min_finite", type=int, default=200)
     ap.add_argument("--codebook_size", type=int, default=1024)
-    ap.add_argument("--num_stages", type=int, default=3)
+    ap.add_argument("--num_stages", type=int, default=2)
     ap.add_argument("--decay", type=float, default=0.99)
     ap.add_argument("--clip_quantile", type=float, default=0.999)
     ap.add_argument("--transform_for_errors", type=str, default="asinh", choices=["none", "asinh"])
