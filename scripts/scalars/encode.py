@@ -26,8 +26,8 @@ OUT_SUFFIX = "_scalar_codes.parquet"
 
 ID_COL = "id"
 
-SCALERS_DIR = Path("/home/schwarz/projetoFM/outputs/scalars_tokenizers/scalers")
-TOK_DIR     = Path("/home/schwarz/projetoFM/outputs/scalars_tokenizers/tokenizers")
+SCALERS_DIR = Path("/home/schwarz/projetoFM/outputs/scalers")
+TOK_DIR     = Path("/home/schwarz/projetoFM/outputs/tokenizers")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 8192
@@ -82,7 +82,7 @@ def _load_tokenizer(col: str, device: str) -> Optional[SpectralPatchRVQ]:
     p = TOK_DIR / f"{col}.pt"
     if not p.exists():
         return None
-    tok = SpectralPatchRVQ.load(p, map_location=device)
+    tok = SpectralPatchRVQ.load_from_file(p, map_location=device)
     tok.eval().to(device)
     return tok
 
