@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -51,10 +52,7 @@ def _load_scalar_columns(scalers_dir: Path, tok_dir: Path) -> List[str]:
     return sorted(cols)
 
 
-def _safe_read_parquet_columns(
-    path: Path,
-    columns: List[str],
-) -> pl.DataFrame:
+def _safe_read_parquet_columns(path: Path, columns: List[str]) -> pl.DataFrame:
     schema = pl.read_parquet_schema(path)
     available = set(schema.keys())
 
@@ -64,6 +62,10 @@ def _safe_read_parquet_columns(
 
     df = pl.read_parquet(path, columns=cols_to_read, use_pyarrow=True)
 
+    # Your cut
+    if "mag_pstotal_r" in df.columns:
+        df = df.filter(pl.col("mag_pstotal_r") < 21)
+
     missing = [c for c in columns if c not in df.columns]
     if missing:
         df = df.with_columns([pl.lit(None).alias(c) for c in missing])
@@ -71,27 +73,50 @@ def _safe_read_parquet_columns(
     return df.select([ID_COL] + [c for c in columns if c != ID_COL])
 
 
-def _load_scaler(col: str) -> Optional[StandardScaler1D]:
-    p = SCALERS_DIR / f"{col}.npz"
-    if not p.exists():
-        return None
-    return StandardScaler1D.load(p)
+# -----------------------------
+# Load resources once
+# -----------------------------
+@dataclass
+class ScalarResources:
+    scalers: Dict[str, Optional[StandardScaler1D]]
+    toks: Dict[str, Optional[SpectralPatchRVQ]]
 
 
-def _load_tokenizer(col: str, device: str) -> Optional[SpectralPatchRVQ]:
-    p = TOK_DIR / f"{col}.pt"
-    if not p.exists():
-        return None
-    tok = SpectralPatchRVQ.load_from_file(p, map_location=device)
-    tok.eval().to(device)
-    return tok
+def load_resources_once(
+    scalar_columns: List[str],
+    *,
+    scalers_dir: Path,
+    tok_dir: Path,
+    device: str,
+) -> ScalarResources:
+    scalers: Dict[str, Optional[StandardScaler1D]] = {}
+    toks: Dict[str, Optional[SpectralPatchRVQ]] = {}
+
+    for col in tqdm(scalar_columns, desc="Loading scalers/tokenizers"):
+        # scaler
+        sp = scalers_dir / f"{col}.npz"
+        if sp.exists():
+            scalers[col] = StandardScaler1D.load(sp)
+        else:
+            scalers[col] = None
+
+        # tokenizer
+        tp = tok_dir / f"{col}.pt"
+        if tp.exists():
+            tok = SpectralPatchRVQ.load_from_file(tp, map_location=device)
+            tok.eval().to(device)
+            toks[col] = tok
+        else:
+            toks[col] = None
+
+    return ScalarResources(scalers=scalers, toks=toks)
 
 
 @torch.no_grad()
 def _encode_scalar_column(
     values: np.ndarray,          # [N]
-    scaler: StandardScaler1D,
-    tok: SpectralPatchRVQ,
+    scaler: Optional[StandardScaler1D],
+    tok: Optional[SpectralPatchRVQ],
     *,
     device: str,
     batch_size: int,
@@ -108,6 +133,8 @@ def _encode_scalar_column(
         return out_codes, mask
 
     vn = scaler.transform_x(v[idx]).astype(np.float32)
+
+    # NOTE: keep exactly your input shape expectation [-1,1,1]
     xn = torch.from_numpy(vn.reshape(-1, 1, 1))
 
     for j0 in range(0, xn.shape[0], batch_size):
@@ -126,6 +153,7 @@ def encode_scalars_one_file(
     infile: Path,
     *,
     scalar_columns: List[str],
+    resources: ScalarResources,
     device: str,
     batch_size: int,
 ) -> pl.DataFrame:
@@ -134,13 +162,12 @@ def encode_scalars_one_file(
     if df.height == 0:
         return pl.DataFrame({ID_COL: []})
 
-    out: Dict[str, List] = {
-        ID_COL: df[ID_COL].cast(pl.Utf8).to_list()
-    }
+    out: Dict[str, List] = {ID_COL: df[ID_COL].cast(pl.Utf8).to_list()}
 
+    # process each scalar column using cached scaler/tokenizer
     for col in scalar_columns:
-        scaler = _load_scaler(col)
-        tok = _load_tokenizer(col, device)
+        scaler = resources.scalers.get(col, None)
+        tok    = resources.toks.get(col, None)
 
         s = df.select(pl.col(col).cast(pl.Float64, strict=False)).to_series()
         v = s.to_numpy().astype(np.float64, copy=False)
@@ -177,11 +204,20 @@ def main():
     print(f"Files: {len(files)}")
     print(f"Scalar columns: {len(scalar_columns)}")
 
+    # ✅ Load everything once
+    resources = load_resources_once(
+        scalar_columns,
+        scalers_dir=SCALERS_DIR,
+        tok_dir=TOK_DIR,
+        device=DEVICE,
+    )
+
     for f in tqdm(files, desc="Encoding scalar columns"):
         try:
             df_out = encode_scalars_one_file(
                 f,
                 scalar_columns=scalar_columns,
+                resources=resources,
                 device=DEVICE,
                 batch_size=BATCH_SIZE,
             )

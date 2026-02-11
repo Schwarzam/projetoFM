@@ -65,15 +65,16 @@ def main():
 
                 z_map = lat[start:end].to(device).view(-1, CHANNELS, H, W)
                 out = srvq.encode(z_map)
-                codes = out["codes"].detach().cpu().numpy()   # [B,H,W,R]
+                codes = out["codes"].detach().cpu().to(torch.int32).numpy()  # [B,H,W,R]
+                codes = codes.reshape(codes.shape[0], -1)                   # [B, H*W*R]
+                codes_out.extend(codes.tolist())                            # list[list[int]]
 
                 ids_out.extend(df["id"][start:end].to_list())
-                codes_out.extend(codes)
 
         df_codes = pl.DataFrame(
             {
                 "id": ids_out,
-                "codes": codes_out,
+                "codes": pl.Series("codes", codes_out, dtype=pl.List(pl.Int32)),
             }
         )
 
