@@ -4,6 +4,9 @@ outputs
 __pycache__/
 *.py[codz]
 *$py.class
+*.pt 
+checkpoints_astromm
+*.parquet
 
 # C extensions
 *.so

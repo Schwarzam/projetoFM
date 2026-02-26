@@ -17,6 +17,12 @@ This is a minimal training script (single GPU / CPU).
 
 from __future__ import annotations
 
+import os
+
+# use CUDA GPU 1
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 from pathlib import Path
 import math
 import copy
@@ -36,14 +42,14 @@ OUT_DIR = Path("./checkpoints_astromm")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Sampling / loader
-N_SAMPLES = 10_000_000          # set lower for debugging
-BATCH_SIZE = 256               # reduce if OOM
+N_SAMPLES = 30_000_000          # set lower for debugging
+BATCH_SIZE = 1024               # reduce if OOM
 NUM_WORKERS = 0
 PIN_MEMORY = True
 SEED = 42
 
 # Training
-EPOCHS = 3
+EPOCHS = 15
 LR = 3e-4
 WEIGHT_DECAY = 1e-2
 USE_AMP = torch.cuda.is_available()
@@ -58,7 +64,7 @@ DROPOUT = 0.1
 # Vocab sizes (adjust to your true codebooks)
 IMAGE_VOCAB = 2048 + 2
 DESI_VOCAB = 1024 + 2
-GAIAXP_VOCAB = 2048 + 2
+GAIAXP_VOCAB = 1024 + 2
 SCALAR_VOCAB = 1024 + 2
 
 PAD_ID = 0
