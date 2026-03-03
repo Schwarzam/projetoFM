@@ -10,9 +10,11 @@ Expected columns in final_all.parquet (at least some of these):
 - image_codes
 - desi_codes
 - gaiaxp_codes OR bp_codes/rp_codes
-- scalar_codes (preferred) OR fallback scalar cols
+- scalar_codes (optional). If missing, we autodetect scalar_* columns and pack them.
 
-This is a minimal training script (single GPU / CPU).
+Assumptions for autodetected scalar_* columns:
+- All scalar_* columns have the SAME SHAPE (either scalar int per row, or list/array of 3 ints per row).
+- Missing values are null or empty list; these become PAD.
 """
 
 from __future__ import annotations
@@ -20,12 +22,10 @@ from __future__ import annotations
 import os
 
 # use CUDA GPU 1
-
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from pathlib import Path
 import math
-import copy
 import numpy as np
 import polars as pl
 import torch
@@ -42,8 +42,8 @@ OUT_DIR = Path("./checkpoints_astromm")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Sampling / loader
-N_SAMPLES = 30_000_000          # set lower for debugging
-BATCH_SIZE = 1024               # reduce if OOM
+N_SAMPLES = 5_000_000
+BATCH_SIZE = 1024
 NUM_WORKERS = 0
 PIN_MEMORY = True
 SEED = 42
@@ -54,7 +54,7 @@ LR = 3e-4
 WEIGHT_DECAY = 1e-2
 USE_AMP = torch.cuda.is_available()
 
-# Model size (12.3M-ish)
+# Model size (~12M)
 D_MODEL = 256
 NHEAD = 8
 NUM_LAYERS = 6
@@ -70,26 +70,23 @@ SCALAR_VOCAB = 1024 + 2
 PAD_ID = 0
 MASK_ID = 1
 
-MASK_IDS = {
-    "image": MASK_ID,
-    "desi": MASK_ID,
-    "gaiaxp": MASK_ID,
-    "scalar": MASK_ID,
-}
-
+MASK_IDS = {"image": MASK_ID, "desi": MASK_ID, "gaiaxp": MASK_ID, "scalar": MASK_ID}
 LOSS_WEIGHTS = {"image": 1.0, "desi": 1.0, "gaia": 1.0, "scalar": 0.5}
 
 # Sequence sizes
 L_IMAGE = 576
 L_DESI = 244
 L_GAIAXP = 55
-L_SCALAR = 1
-SEQ_LEN = L_IMAGE + L_DESI + L_GAIAXP + L_SCALAR
+
+# Scalar sequence length is determined at runtime from scalar_* columns (if scalar_codes missing)
+# We'll set L_SCALAR after reading parquet.
+L_SCALAR = None  # runtime
+SEQ_LEN = None   # runtime
 
 IMG_LEN = L_IMAGE
 DESI_SHAPE = (L_DESI, 3)
 GAIAXP_SHAPE = (L_GAIAXP, 3)
-SCALAR_SHAPE = (L_SCALAR, 3)
+SCALAR_SHAPE = None  # runtime
 
 
 # ============================================================
@@ -136,25 +133,6 @@ def has_real_content(x):
     return arr.size > 0
 
 
-def build_scalar_rvq_from_row_dict(row, scalar_cols=None):
-    if "scalar_codes" in row and row["scalar_codes"] is not None:
-        return to_fixed_array(row["scalar_codes"], SCALAR_SHAPE, PAD_ID)
-
-    scalar_cols = scalar_cols or []
-    vals = []
-    for c in scalar_cols[:3]:
-        v = row.get(c)
-        if v is None:
-            vals.append(PAD_ID)
-        elif isinstance(v, (list, tuple, np.ndarray)):
-            arr = np.asarray(v).reshape(-1)
-            vals.append(int(arr[0]) if arr.size > 0 else PAD_ID)
-        else:
-            vals.append(int(v))
-    vals = (vals + [PAD_ID, PAD_ID, PAD_ID])[:3]
-    return np.array(vals, dtype=np.int64).reshape(SCALAR_SHAPE)
-
-
 def build_gaiaxp_from_row_dict(row):
     if "gaiaxp_codes" in row and row["gaiaxp_codes"] is not None:
         return to_fixed_array(row["gaiaxp_codes"], GAIAXP_SHAPE, PAD_ID), True
@@ -170,18 +148,55 @@ def build_gaiaxp_from_row_dict(row):
     return np.full(GAIAXP_SHAPE, PAD_ID, dtype=np.int64), False
 
 
+def build_scalar_from_row_dict(row, scalar_cols, scalar_shape):
+    """
+    Returns scalar_codes with shape (L_SCALAR, 3) where L_SCALAR=len(scalar_cols).
+    Assumes each scalar_* column is either:
+      - int code (single-stage): stored into stage0, stage1/2 PAD
+      - list/array of 3 ints (3-stage RVQ): used directly
+    """
+    # If scalar_codes exists, trust it (and reshape/pad if needed)
+    if "scalar_codes" in row and row["scalar_codes"] is not None:
+        return to_fixed_array(row["scalar_codes"], scalar_shape, PAD_ID)
+
+    Ls = scalar_shape[0]
+    out = np.full(scalar_shape, PAD_ID, dtype=np.int64)
+
+    for i, c in enumerate(scalar_cols[:Ls]):
+        v = row.get(c)
+        if v is None:
+            continue
+
+        if isinstance(v, (list, tuple, np.ndarray)):
+            arr = np.asarray(v).reshape(-1)
+            if arr.size >= 3:
+                out[i, 0] = int(arr[0])
+                out[i, 1] = int(arr[1])
+                out[i, 2] = int(arr[2])
+            elif arr.size == 1:
+                out[i, 0] = int(arr[0])
+        else:
+            out[i, 0] = int(v)
+
+    return out
+
+
 # ============================================================
 # Dataset
 # ============================================================
 class PolarsMMRvqDataset(Dataset):
-    def __init__(self, df: pl.DataFrame, indices=None, scalar_cols=None):
+    def __init__(self, df: pl.DataFrame, indices=None, scalar_cols=None, scalar_shape=None):
         self.scalar_cols = scalar_cols or []
+        self.scalar_shape = scalar_shape
 
         keep_cols = ["id"]
         for c in ["image_codes", "desi_codes", "gaiaxp_codes", "bp_codes", "rp_codes", "scalar_codes"]:
             if c in df.columns:
                 keep_cols.append(c)
+
+        # include scalar_* cols if scalar_codes not present
         keep_cols += [c for c in self.scalar_cols if c in df.columns]
+
         self.df = df.select(list(dict.fromkeys(keep_cols)))
 
         if indices is None:
@@ -206,7 +221,12 @@ class PolarsMMRvqDataset(Dataset):
         desi_codes = to_fixed_array(raw_desi, DESI_SHAPE, PAD_ID)
 
         gaiaxp_codes, has_gaiaxp = build_gaiaxp_from_row_dict(row)
-        scalar_codes = build_scalar_rvq_from_row_dict(row, self.scalar_cols)
+
+        scalar_codes = build_scalar_from_row_dict(
+            row=row,
+            scalar_cols=self.scalar_cols,
+            scalar_shape=self.scalar_shape,
+        )
 
         return {
             "id": str(row["id"]),
@@ -254,6 +274,11 @@ class SimpleAstroFM(nn.Module):
         desi_vocab_size: int,
         gaiaxp_vocab_size: int,
         scalar_vocab_size: int,
+        seq_len: int,
+        l_image: int,
+        l_desi: int,
+        l_gaia: int,
+        l_scalar: int,
         d_model: int = 256,
         nhead: int = 8,
         num_layers: int = 6,
@@ -262,6 +287,11 @@ class SimpleAstroFM(nn.Module):
     ):
         super().__init__()
         self.d_model = d_model
+        self.l_image = l_image
+        self.l_desi = l_desi
+        self.l_gaia = l_gaia
+        self.l_scalar = l_scalar
+        self.seq_len = seq_len
 
         self.image_emb = nn.Embedding(image_vocab_size, d_model)
         self.desi_emb = RVQStageEmbed(desi_vocab_size, d_model)
@@ -272,7 +302,7 @@ class SimpleAstroFM(nn.Module):
         self.missing_desi = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.missing_gaiaxp = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
-        self.pos_emb = nn.Embedding(SEQ_LEN, d_model)
+        self.pos_emb = nn.Embedding(seq_len, d_model)
         self.mod_emb = nn.Embedding(4, d_model)
 
         enc_layer = nn.TransformerEncoderLayer(
@@ -311,23 +341,23 @@ class SimpleAstroFM(nn.Module):
 
         if "has_image" in batch:
             has_image = batch["has_image"].view(B, 1, 1)
-            x_img = torch.where(has_image, x_img, self.missing_image.expand(B, L_IMAGE, self.d_model))
+            x_img = torch.where(has_image, x_img, self.missing_image.expand(B, self.l_image, self.d_model))
         if "has_desi" in batch:
             has_desi = batch["has_desi"].view(B, 1, 1)
-            x_desi = torch.where(has_desi, x_desi, self.missing_desi.expand(B, L_DESI, self.d_model))
+            x_desi = torch.where(has_desi, x_desi, self.missing_desi.expand(B, self.l_desi, self.d_model))
         if "has_gaiaxp" in batch:
             has_gaiaxp = batch["has_gaiaxp"].view(B, 1, 1)
-            x_gaia = torch.where(has_gaiaxp, x_gaia, self.missing_gaiaxp.expand(B, L_GAIAXP, self.d_model))
+            x_gaia = torch.where(has_gaiaxp, x_gaia, self.missing_gaiaxp.expand(B, self.l_gaia, self.d_model))
 
         x = torch.cat([x_img, x_desi, x_gaia, x_scalar], dim=1)
 
-        pos = torch.arange(SEQ_LEN, device=device).unsqueeze(0).expand(B, SEQ_LEN)
+        pos = torch.arange(self.seq_len, device=device).unsqueeze(0).expand(B, self.seq_len)
         mod_ids = torch.cat(
             [
-                torch.zeros((B, L_IMAGE), dtype=torch.long, device=device),
-                torch.ones((B, L_DESI), dtype=torch.long, device=device),
-                torch.full((B, L_GAIAXP), 2, dtype=torch.long, device=device),
-                torch.full((B, L_SCALAR), 3, dtype=torch.long, device=device),
+                torch.zeros((B, self.l_image), dtype=torch.long, device=device),
+                torch.ones((B, self.l_desi), dtype=torch.long, device=device),
+                torch.full((B, self.l_gaia), 2, dtype=torch.long, device=device),
+                torch.full((B, self.l_scalar), 3, dtype=torch.long, device=device),
             ],
             dim=1,
         )
@@ -337,10 +367,10 @@ class SimpleAstroFM(nn.Module):
         x = self.norm(x)
 
         s0 = 0
-        s1 = L_IMAGE
-        s2 = s1 + L_DESI
-        s3 = s2 + L_GAIAXP
-        s4 = s3 + L_SCALAR
+        s1 = self.l_image
+        s2 = s1 + self.l_desi
+        s3 = s2 + self.l_gaia
+        s4 = s3 + self.l_scalar
 
         z_img = x[:, s0:s1]
         z_desi = x[:, s1:s2]
@@ -351,25 +381,21 @@ class SimpleAstroFM(nn.Module):
             "image_logits": self.image_head(z_img),
             "desi_logits": (self.desi_head0(z_desi), self.desi_head1(z_desi), self.desi_head2(z_desi)),
             "gaia_logits": (self.gaia_head0(z_gaia), self.gaia_head1(z_gaia), self.gaia_head2(z_gaia)),
-            "scalar_logits": (
-                self.scalar_head0(z_scalar),
-                self.scalar_head1(z_scalar),
-                self.scalar_head2(z_scalar),
-            ),
+            "scalar_logits": (self.scalar_head0(z_scalar), self.scalar_head1(z_scalar), self.scalar_head2(z_scalar)),
         }
 
 
 # ============================================================
 # Loss / masking
 # ============================================================
-def make_masks(batch, p_image=0.15, p_desi=0.15, p_gaia=0.15, p_scalar=0.15):
+def make_masks(batch, l_image, l_desi, l_gaia, l_scalar, p_image=0.15, p_desi=0.15, p_gaia=0.15, p_scalar=0.15):
     device = batch["image_codes"].device
     B = batch["image_codes"].shape[0]
 
-    image_mask = (torch.rand(B, L_IMAGE, device=device) < p_image)
-    desi_mask = (torch.rand(B, L_DESI, device=device) < p_desi)
-    gaia_mask = (torch.rand(B, L_GAIAXP, device=device) < p_gaia)
-    scalar_mask = (torch.rand(B, L_SCALAR, device=device) < p_scalar)
+    image_mask = (torch.rand(B, l_image, device=device) < p_image)
+    desi_mask = (torch.rand(B, l_desi, device=device) < p_desi)
+    gaia_mask = (torch.rand(B, l_gaia, device=device) < p_gaia)
+    scalar_mask = (torch.rand(B, l_scalar, device=device) < p_scalar)
 
     image_mask &= batch["has_image"].view(B, 1)
     desi_mask &= batch["has_desi"].view(B, 1)
@@ -379,13 +405,11 @@ def make_masks(batch, p_image=0.15, p_desi=0.15, p_gaia=0.15, p_scalar=0.15):
 
 
 def apply_input_masking(batch, image_mask, desi_mask, gaia_mask, scalar_mask, mask_ids):
-    out = {k: v.clone() if torch.is_tensor(v) else v for k, v in batch.items()}
-
+    out = {k: (v.clone() if torch.is_tensor(v) else v) for k, v in batch.items()}
     out["image_codes"][image_mask] = mask_ids["image"]
     out["desi_codes"][desi_mask] = mask_ids["desi"]
     out["gaiaxp_codes"][gaia_mask] = mask_ids["gaiaxp"]
     out["scalar_codes"][scalar_mask] = mask_ids["scalar"]
-
     return out
 
 
@@ -395,11 +419,11 @@ def masked_ce_loss(logits, targets, pos_mask):
     return F.cross_entropy(logits[pos_mask], targets[pos_mask])
 
 
-def training_loss(model, batch, mask_ids, weights=None):
+def training_loss(model, batch, mask_ids, l_image, l_desi, l_gaia, l_scalar, weights=None):
     if weights is None:
         weights = LOSS_WEIGHTS
 
-    image_mask, desi_mask, gaia_mask, scalar_mask = make_masks(batch)
+    image_mask, desi_mask, gaia_mask, scalar_mask = make_masks(batch, l_image, l_desi, l_gaia, l_scalar)
     masked_batch = apply_input_masking(batch, image_mask, desi_mask, gaia_mask, scalar_mask, mask_ids)
     out = model(masked_batch)
 
@@ -494,17 +518,147 @@ def main():
     final_all = pl.read_parquet(FINAL_ALL_PATH)
     print(f"final_all shape: {final_all.shape}")
 
-    # Optional fallback scalar cols if scalar_codes doesn't exist
-    scalar_cols = []
-    if "scalar_codes" not in final_all.columns:
-        scalar_cols = ["scalar_a_pixel_det", "scalar_b_pixel_det", "scalar_desi_flux_standard_scaler"]
-        print("[WARN] scalar_codes column not found. Using fallback scalar cols:", scalar_cols)
+    # Detect scalar columns
+    if "scalar_codes" in final_all.columns:
+        # Determine scalar length from stored scalar_codes
+        # We assume it's (L_SCALAR, 3) per row; we'll read 1 row to infer
+        first = final_all.select("scalar_codes").drop_nulls().head(1)
+        if first.height == 0:
+            print("[WARN] scalar_codes exists but all null; falling back to scalar_* autodetect.")
+            scalar_cols = sorted([c for c in final_all.columns if c.startswith("scalar_") and c != "scalar_codes"])
+            Ls = len(scalar_cols)
+        else:
+            ex = first["scalar_codes"][0]
+            ex = np.asarray(ex)
+            if ex.ndim == 2 and ex.shape[1] == 3:
+                Ls = int(ex.shape[0])
+            else:
+                # If stored as flat list of 3*L
+                flat = ex.reshape(-1)
+                Ls = int(max(1, flat.size // 3))
+            scalar_cols = []  # not needed
+    else:
+        scalar_cols = sorted([c for c in final_all.columns if c.startswith("scalar_") and c != "scalar_codes"])
+        Ls = len(scalar_cols)
 
-    n = min(N_SAMPLES, final_all.height)
+    if Ls <= 0:
+        print("[WARN] No scalar codes found; setting L_SCALAR=1 with PAD.")
+        Ls = 1
+
+    global L_SCALAR, SEQ_LEN, SCALAR_SHAPE
+    L_SCALAR = Ls
+    SCALAR_SHAPE = (L_SCALAR, 3)
+    SEQ_LEN = L_IMAGE + L_DESI + L_GAIAXP + L_SCALAR
+
+    print(f"[INFO] L_SCALAR={L_SCALAR}  => SEQ_LEN={SEQ_LEN}")
+    if scalar_cols:
+        print(f"[INFO] Using {len(scalar_cols)} scalar_* columns (autodetected). Example:", scalar_cols[:10])
+
+    # ============================================================
+    # Tiered sampling: prefer (desi+gaia) then (gaia) then (desi) then (none)
+    # ============================================================
+    def _nonempty_list_expr(colname: str):
+        c = pl.col(colname)
+        # If it's a list column, require len>0; if not, only not-null.
+        # We attempt list.len(); if schema doesn't support it, we ignore.
+        expr = c.is_not_null()
+        try:
+            expr = expr & (c.list.len() > 0)
+        except Exception:
+            pass
+        return expr
+
+    # DESI present?
+    has_desi_df = _nonempty_list_expr("desi_codes") if "desi_codes" in final_all.columns else pl.lit(False)
+
+    # Gaia present? (gaiaxp_codes OR bp/rp)
+    if "gaiaxp_codes" in final_all.columns:
+        has_gaia_df = _nonempty_list_expr("gaiaxp_codes")
+    else:
+        has_bp = _nonempty_list_expr("bp_codes") if "bp_codes" in final_all.columns else pl.lit(False)
+        has_rp = _nonempty_list_expr("rp_codes") if "rp_codes" in final_all.columns else pl.lit(False)
+        has_gaia_df = has_bp | has_rp
+
+    m = final_all.select(
+        has_desi_df.alias("has_desi"),
+        has_gaia_df.alias("has_gaia"),
+    ).to_dict(as_series=False)
+
+    has_desi = np.asarray(m["has_desi"], dtype=bool)
+    has_gaia = np.asarray(m["has_gaia"], dtype=bool)
+
+    idx_both = np.where(has_desi & has_gaia)[0]
+    idx_gaia = np.where(~has_desi & has_gaia)[0]
+    idx_desi = np.where(has_desi & ~has_gaia)[0]
+    idx_neither = np.where(~has_desi & ~has_gaia)[0]
+
+    print(
+        f"Counts: both={idx_both.size}, gaia_only={idx_gaia.size}, "
+        f"desi_only={idx_desi.size}, neither={idx_neither.size}"
+    )
+
+    # Target mix (edit these)
+    P_BOTH = 0.60
+    P_GAIA = 0.25
+    P_DESI = 0.10
+    P_NONE = 0.05
+
+    ps = np.array([P_BOTH, P_GAIA, P_DESI, P_NONE], dtype=float)
+    ps = ps / ps.sum()
+
+    n_total = min(N_SAMPLES, final_all.height)
+    n_targets = (ps * n_total).astype(int)
+    n_targets[0] += (n_total - n_targets.sum())  # rounding fix
+
     rng = np.random.default_rng(SEED)
-    sample_indices = rng.choice(final_all.height, size=n, replace=False)
 
-    ds = PolarsMMRvqDataset(final_all, indices=sample_indices, scalar_cols=scalar_cols)
+    def pick_from(pool, k):
+        k = int(min(k, pool.size))
+        if k <= 0:
+            return np.empty((0,), dtype=np.int64)
+        return rng.choice(pool, size=k, replace=False)
+
+    pick_both = pick_from(idx_both, n_targets[0])
+    pick_gaia = pick_from(idx_gaia, n_targets[1])
+    pick_desi = pick_from(idx_desi, n_targets[2])
+    pick_none = pick_from(idx_neither, n_targets[3])
+
+    sample_indices = np.concatenate([pick_both, pick_gaia, pick_desi, pick_none])
+
+    # Top-up if any group was too small
+    remaining = n_total - sample_indices.size
+    if remaining > 0:
+        leftovers = []
+        if idx_both.size > pick_both.size:
+            leftovers.append(np.setdiff1d(idx_both, pick_both, assume_unique=False))
+        if idx_gaia.size > pick_gaia.size:
+            leftovers.append(np.setdiff1d(idx_gaia, pick_gaia, assume_unique=False))
+        if idx_desi.size > pick_desi.size:
+            leftovers.append(np.setdiff1d(idx_desi, pick_desi, assume_unique=False))
+        if idx_neither.size > pick_none.size:
+            leftovers.append(np.setdiff1d(idx_neither, pick_none, assume_unique=False))
+
+        if leftovers:
+            pool = np.concatenate(leftovers)
+            k = min(remaining, pool.size)
+            extra = rng.choice(pool, size=k, replace=False)
+            sample_indices = np.concatenate([sample_indices, extra])
+
+    rng.shuffle(sample_indices)
+
+    print(f"Using {sample_indices.size} samples for training (target={n_total}).")
+    print(f"Both:    {np.isin(sample_indices, idx_both).sum()} (target={n_targets[0]})")
+    print(f"Gaia:    {np.isin(sample_indices, idx_gaia).sum()} (target={n_targets[1]})")
+    print(f"DESI:    {np.isin(sample_indices, idx_desi).sum()} (target={n_targets[2]})")
+    print(f"Neither: {np.isin(sample_indices, idx_neither).sum()} (target={n_targets[3]})")
+
+    ds = PolarsMMRvqDataset(
+        final_all,
+        indices=sample_indices,
+        scalar_cols=scalar_cols,
+        scalar_shape=SCALAR_SHAPE,
+    )
+
     dl = DataLoader(
         ds,
         batch_size=BATCH_SIZE,
@@ -522,6 +676,11 @@ def main():
         desi_vocab_size=DESI_VOCAB,
         gaiaxp_vocab_size=GAIAXP_VOCAB,
         scalar_vocab_size=SCALAR_VOCAB,
+        seq_len=SEQ_LEN,
+        l_image=L_IMAGE,
+        l_desi=L_DESI,
+        l_gaia=L_GAIAXP,
+        l_scalar=L_SCALAR,
         d_model=D_MODEL,
         nhead=NHEAD,
         num_layers=NUM_LAYERS,
@@ -552,7 +711,16 @@ def main():
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", enabled=USE_AMP):
-                loss, metrics = training_loss(model, batch, MASK_IDS, weights=LOSS_WEIGHTS)
+                loss, metrics = training_loss(
+                    model,
+                    batch,
+                    MASK_IDS,
+                    l_image=L_IMAGE,
+                    l_desi=L_DESI,
+                    l_gaia=L_GAIAXP,
+                    l_scalar=L_SCALAR,
+                    weights=LOSS_WEIGHTS,
+                )
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
