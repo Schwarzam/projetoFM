@@ -5,6 +5,11 @@
 Train a simple multimodal RVQ foundation model from final_all.parquet
 and save checkpoint whenever the average epoch loss improves.
 
+Adds "modality dropout" (full-modality masking) so the model learns tasks like:
+  DESI <- (GaiaXP + scalar) when DESI is fully masked.
+
+Also saves a PNG learning curve at the end.
+
 Expected columns in final_all.parquet (at least some of these):
 - id
 - image_codes
@@ -20,8 +25,6 @@ Assumptions for autodetected scalar_* columns:
 from __future__ import annotations
 
 import os
-
-# use CUDA GPU 1
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from pathlib import Path
@@ -54,6 +57,17 @@ LR = 3e-4
 WEIGHT_DECAY = 1e-2
 USE_AMP = torch.cuda.is_available()
 
+# Token-level MLM masking probs
+P_IMAGE = 0.15
+P_DESI = 0.15
+P_GAIA = 0.15
+P_SCALAR = 0.15
+
+# Modality dropout (cross-modal objectives)
+P_FULL_DESI = 0.30      # mask ALL DESI tokens for this fraction of rows (where DESI exists)
+P_FULL_IMAGE = 0.10     # optionally mask ALL image tokens for some rows (where image exists)
+PAIR_FULL_IMAGE_WITH_FULL_DESI = True  # if True, whenever DESI is fully masked and image exists, also mask all image
+
 # Model size (~12M)
 D_MODEL = 256
 NHEAD = 8
@@ -79,7 +93,6 @@ L_DESI = 244
 L_GAIAXP = 55
 
 # Scalar sequence length is determined at runtime from scalar_* columns (if scalar_codes missing)
-# We'll set L_SCALAR after reading parquet.
 L_SCALAR = None  # runtime
 SEQ_LEN = None   # runtime
 
@@ -155,7 +168,6 @@ def build_scalar_from_row_dict(row, scalar_cols, scalar_shape):
       - int code (single-stage): stored into stage0, stage1/2 PAD
       - list/array of 3 ints (3-stage RVQ): used directly
     """
-    # If scalar_codes exists, trust it (and reshape/pad if needed)
     if "scalar_codes" in row and row["scalar_codes"] is not None:
         return to_fixed_array(row["scalar_codes"], scalar_shape, PAD_ID)
 
@@ -194,9 +206,7 @@ class PolarsMMRvqDataset(Dataset):
             if c in df.columns:
                 keep_cols.append(c)
 
-        # include scalar_* cols if scalar_codes not present
         keep_cols += [c for c in self.scalar_cols if c in df.columns]
-
         self.df = df.select(list(dict.fromkeys(keep_cols)))
 
         if indices is None:
@@ -388,18 +398,49 @@ class SimpleAstroFM(nn.Module):
 # ============================================================
 # Loss / masking
 # ============================================================
-def make_masks(batch, l_image, l_desi, l_gaia, l_scalar, p_image=0.15, p_desi=0.15, p_gaia=0.15, p_scalar=0.15):
+def make_masks(
+    batch,
+    l_image,
+    l_desi,
+    l_gaia,
+    l_scalar,
+    p_image=0.15,
+    p_desi=0.15,
+    p_gaia=0.15,
+    p_scalar=0.15,
+    p_full_desi=0.30,
+    p_full_image=0.10,
+    pair_full_image_with_full_desi=True,
+):
     device = batch["image_codes"].device
     B = batch["image_codes"].shape[0]
 
+    # token-level masks
     image_mask = (torch.rand(B, l_image, device=device) < p_image)
     desi_mask = (torch.rand(B, l_desi, device=device) < p_desi)
     gaia_mask = (torch.rand(B, l_gaia, device=device) < p_gaia)
     scalar_mask = (torch.rand(B, l_scalar, device=device) < p_scalar)
 
+    # only mask where modality exists
     image_mask &= batch["has_image"].view(B, 1)
     desi_mask &= batch["has_desi"].view(B, 1)
     gaia_mask &= batch["has_gaiaxp"].view(B, 1)
+
+    # full DESI masking for some rows
+    full_desi = (torch.rand(B, device=device) < p_full_desi) & batch["has_desi"]
+    if full_desi.any():
+        desi_mask[full_desi] = True
+
+    # full image masking for some rows
+    full_img = (torch.rand(B, device=device) < p_full_image) & batch["has_image"]
+    if full_img.any():
+        image_mask[full_img] = True
+
+    # optionally: whenever we full-mask DESI, also full-mask image (forces Gaia+scalar -> DESI)
+    if pair_full_image_with_full_desi:
+        paired = full_desi & batch["has_image"]
+        if paired.any():
+            image_mask[paired] = True
 
     return image_mask, desi_mask, gaia_mask, scalar_mask
 
@@ -423,7 +464,21 @@ def training_loss(model, batch, mask_ids, l_image, l_desi, l_gaia, l_scalar, wei
     if weights is None:
         weights = LOSS_WEIGHTS
 
-    image_mask, desi_mask, gaia_mask, scalar_mask = make_masks(batch, l_image, l_desi, l_gaia, l_scalar)
+    image_mask, desi_mask, gaia_mask, scalar_mask = make_masks(
+        batch,
+        l_image=l_image,
+        l_desi=l_desi,
+        l_gaia=l_gaia,
+        l_scalar=l_scalar,
+        p_image=P_IMAGE,
+        p_desi=P_DESI,
+        p_gaia=P_GAIA,
+        p_scalar=P_SCALAR,
+        p_full_desi=P_FULL_DESI,
+        p_full_image=P_FULL_IMAGE,
+        pair_full_image_with_full_desi=PAIR_FULL_IMAGE_WITH_FULL_DESI,
+    )
+
     masked_batch = apply_input_masking(batch, image_mask, desi_mask, gaia_mask, scalar_mask, mask_ids)
     out = model(masked_batch)
 
@@ -472,6 +527,8 @@ def training_loss(model, batch, mask_ids, l_image, l_desi, l_gaia, l_scalar, wei
         "n_mask_desi": int(desi_mask.sum().item()),
         "n_mask_gaia": int(gaia_mask.sum().item()),
         "n_mask_scalar": int(scalar_mask.sum().item()),
+        "n_full_desi_rows": int(((desi_mask.sum(dim=1) == l_desi) & batch["has_desi"]).sum().item()),
+        "n_full_img_rows": int(((image_mask.sum(dim=1) == l_image) & batch["has_image"]).sum().item()),
     }
     return loss, metrics
 
@@ -492,6 +549,7 @@ def save_checkpoint(path: Path, model, optimizer, scaler, epoch, step, best_loss
             "NHEAD": NHEAD,
             "NUM_LAYERS": NUM_LAYERS,
             "FF_MULT": FF_MULT,
+            "DROPOUT": DROPOUT,
             "BATCH_SIZE": BATCH_SIZE,
             "LR": LR,
             "WEIGHT_DECAY": WEIGHT_DECAY,
@@ -501,11 +559,51 @@ def save_checkpoint(path: Path, model, optimizer, scaler, epoch, step, best_loss
             "SCALAR_VOCAB": SCALAR_VOCAB,
             "MASK_IDS": MASK_IDS,
             "LOSS_WEIGHTS": LOSS_WEIGHTS,
+            "L_IMAGE": L_IMAGE,
+            "L_DESI": L_DESI,
+            "L_GAIAXP": L_GAIAXP,
+            "L_SCALAR": L_SCALAR,
+            "SEQ_LEN": SEQ_LEN,
+            "P_IMAGE": P_IMAGE,
+            "P_DESI": P_DESI,
+            "P_GAIA": P_GAIA,
+            "P_SCALAR": P_SCALAR,
+            "P_FULL_DESI": P_FULL_DESI,
+            "P_FULL_IMAGE": P_FULL_IMAGE,
+            "PAIR_FULL_IMAGE_WITH_FULL_DESI": PAIR_FULL_IMAGE_WITH_FULL_DESI,
         },
     }
     if extra is not None:
         ckpt["extra"] = extra
     torch.save(ckpt, path)
+
+
+# ============================================================
+# Plot learning curves
+# ============================================================
+def plot_learning_curves(history, out_path: Path):
+    import matplotlib.pyplot as plt
+
+    epochs = [h["epoch"] for h in history]
+    avg_loss = [h["epoch_avg_loss"] for h in history]
+    img = [h["epoch_avg_loss_image"] for h in history]
+    desi = [h["epoch_avg_loss_desi"] for h in history]
+    gaia = [h["epoch_avg_loss_gaia"] for h in history]
+    scalar = [h["epoch_avg_loss_scalar"] for h in history]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, avg_loss, label="total")
+    plt.plot(epochs, img, label="image")
+    plt.plot(epochs, desi, label="desi")
+    plt.plot(epochs, gaia, label="gaia")
+    plt.plot(epochs, scalar, label="scalar")
+    plt.xlabel("epoch")
+    plt.ylabel("avg loss")
+    plt.title("Training learning curves")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
 
 
 # ============================================================
@@ -518,25 +616,21 @@ def main():
     final_all = pl.read_parquet(FINAL_ALL_PATH)
     print(f"final_all shape: {final_all.shape}")
 
-    # Detect scalar columns
+    # Detect scalar columns / L_SCALAR
     if "scalar_codes" in final_all.columns:
-        # Determine scalar length from stored scalar_codes
-        # We assume it's (L_SCALAR, 3) per row; we'll read 1 row to infer
         first = final_all.select("scalar_codes").drop_nulls().head(1)
         if first.height == 0:
             print("[WARN] scalar_codes exists but all null; falling back to scalar_* autodetect.")
             scalar_cols = sorted([c for c in final_all.columns if c.startswith("scalar_") and c != "scalar_codes"])
             Ls = len(scalar_cols)
         else:
-            ex = first["scalar_codes"][0]
-            ex = np.asarray(ex)
+            ex = np.asarray(first["scalar_codes"][0])
             if ex.ndim == 2 and ex.shape[1] == 3:
                 Ls = int(ex.shape[0])
             else:
-                # If stored as flat list of 3*L
                 flat = ex.reshape(-1)
                 Ls = int(max(1, flat.size // 3))
-            scalar_cols = []  # not needed
+            scalar_cols = []
     else:
         scalar_cols = sorted([c for c in final_all.columns if c.startswith("scalar_") and c != "scalar_codes"])
         Ls = len(scalar_cols)
@@ -559,8 +653,6 @@ def main():
     # ============================================================
     def _nonempty_list_expr(colname: str):
         c = pl.col(colname)
-        # If it's a list column, require len>0; if not, only not-null.
-        # We attempt list.len(); if schema doesn't support it, we ignore.
         expr = c.is_not_null()
         try:
             expr = expr & (c.list.len() > 0)
@@ -568,10 +660,8 @@ def main():
             pass
         return expr
 
-    # DESI present?
     has_desi_df = _nonempty_list_expr("desi_codes") if "desi_codes" in final_all.columns else pl.lit(False)
 
-    # Gaia present? (gaiaxp_codes OR bp/rp)
     if "gaiaxp_codes" in final_all.columns:
         has_gaia_df = _nonempty_list_expr("gaiaxp_codes")
     else:
@@ -597,18 +687,13 @@ def main():
         f"desi_only={idx_desi.size}, neither={idx_neither.size}"
     )
 
-    # Target mix (edit these)
-    P_BOTH = 0.60
-    P_GAIA = 0.25
-    P_DESI = 0.10
-    P_NONE = 0.05
-
-    ps = np.array([P_BOTH, P_GAIA, P_DESI, P_NONE], dtype=float)
+    P_BOTH, P_GAIA_S, P_DESI_S, P_NONE = 0.60, 0.25, 0.10, 0.05
+    ps = np.array([P_BOTH, P_GAIA_S, P_DESI_S, P_NONE], dtype=float)
     ps = ps / ps.sum()
 
     n_total = min(N_SAMPLES, final_all.height)
     n_targets = (ps * n_total).astype(int)
-    n_targets[0] += (n_total - n_targets.sum())  # rounding fix
+    n_targets[0] += (n_total - n_targets.sum())
 
     rng = np.random.default_rng(SEED)
 
@@ -625,7 +710,6 @@ def main():
 
     sample_indices = np.concatenate([pick_both, pick_gaia, pick_desi, pick_none])
 
-    # Top-up if any group was too small
     remaining = n_total - sample_indices.size
     if remaining > 0:
         leftovers = []
@@ -697,11 +781,17 @@ def main():
     best_ckpt_path = OUT_DIR / "best_model.pt"
     last_ckpt_path = OUT_DIR / "last_model.pt"
 
+    history = []
+
     print("Starting training...")
     model.train()
 
     for epoch in range(EPOCHS):
         running = 0.0
+        run_img = 0.0
+        run_desi = 0.0
+        run_gaia = 0.0
+        run_scalar = 0.0
 
         for step, batch in enumerate(dl):
             for k, v in batch.items():
@@ -727,6 +817,10 @@ def main():
             scaler.update()
 
             running += metrics["loss"]
+            run_img += metrics["loss_image"]
+            run_desi += metrics["loss_desi"]
+            run_gaia += metrics["loss_gaia"]
+            run_scalar += metrics["loss_scalar"]
 
             if step % 20 == 0:
                 print(
@@ -738,10 +832,26 @@ def main():
                     f"scalar={metrics['loss_scalar']:.4f} "
                     f"| masks img/desi/gaia/sc="
                     f"{metrics['n_mask_img']}/{metrics['n_mask_desi']}/"
-                    f"{metrics['n_mask_gaia']}/{metrics['n_mask_scalar']}"
+                    f"{metrics['n_mask_gaia']}/{metrics['n_mask_scalar']} "
+                    f"| full_rows desi/img={metrics['n_full_desi_rows']}/{metrics['n_full_img_rows']}"
                 )
 
-        epoch_avg_loss = running / (step + 1)
+        denom = (step + 1)
+        epoch_avg_loss = running / denom
+        epoch_avg_img = run_img / denom
+        epoch_avg_desi = run_desi / denom
+        epoch_avg_gaia = run_gaia / denom
+        epoch_avg_scalar = run_scalar / denom
+
+        history.append({
+            "epoch": epoch,
+            "epoch_avg_loss": epoch_avg_loss,
+            "epoch_avg_loss_image": epoch_avg_img,
+            "epoch_avg_loss_desi": epoch_avg_desi,
+            "epoch_avg_loss_gaia": epoch_avg_gaia,
+            "epoch_avg_loss_scalar": epoch_avg_scalar,
+        })
+
         print(f"Epoch {epoch} avg loss: {epoch_avg_loss:.6f}")
 
         # Save last every epoch
@@ -753,7 +863,7 @@ def main():
             epoch=epoch,
             step=step,
             best_loss=best_epoch_loss,
-            extra={"epoch_avg_loss": epoch_avg_loss},
+            extra={"epoch_avg_loss": epoch_avg_loss, "history": history},
         )
 
         # Save best on improvement
@@ -768,8 +878,13 @@ def main():
                 epoch=epoch,
                 step=step,
                 best_loss=best_epoch_loss,
-                extra={"epoch_avg_loss": epoch_avg_loss},
+                extra={"epoch_avg_loss": epoch_avg_loss, "history": history},
             )
+
+    # Plot learning curve
+    lc_path = OUT_DIR / "learning_curve.png"
+    plot_learning_curves(history, lc_path)
+    print("Saved learning curve:", lc_path)
 
     print("Training finished.")
     print("Best checkpoint:", best_ckpt_path)
