@@ -36,6 +36,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 # ============================================================
 # Config
@@ -46,13 +48,14 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Sampling / loader
 N_SAMPLES = 5_000_000
-BATCH_SIZE = 1024
+BATCH_SIZE = 64
+GRAD_ACCUM_STEPS = 8   # e.g. 8
 NUM_WORKERS = 0
 PIN_MEMORY = True
 SEED = 42
 
 # Training
-EPOCHS = 15
+EPOCHS = 30
 LR = 3e-4
 WEIGHT_DECAY = 1e-2
 USE_AMP = torch.cuda.is_available()
@@ -68,10 +71,9 @@ P_FULL_DESI = 0.30      # mask ALL DESI tokens for this fraction of rows (where 
 P_FULL_IMAGE = 0.10     # optionally mask ALL image tokens for some rows (where image exists)
 PAIR_FULL_IMAGE_WITH_FULL_DESI = True  # if True, whenever DESI is fully masked and image exists, also mask all image
 
-# Model size (~12M)
-D_MODEL = 256
-NHEAD = 8
-NUM_LAYERS = 6
+D_MODEL = 768
+NHEAD = 12          # 768/12 = 64 per head
+NUM_LAYERS = 10
 FF_MULT = 4
 DROPOUT = 0.1
 
@@ -778,27 +780,23 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
 
     best_epoch_loss = math.inf
-    best_ckpt_path = OUT_DIR / "best_model.pt"
-    last_ckpt_path = OUT_DIR / "last_model.pt"
+    best_ckpt_path = OUT_DIR / "best_model_100M.pt"
+    last_ckpt_path = OUT_DIR / "last_model_100M.pt"
 
     history = []
 
     print("Starting training...")
     model.train()
 
+    optimizer.zero_grad(set_to_none=True)
+
     for epoch in range(EPOCHS):
-        running = 0.0
-        run_img = 0.0
-        run_desi = 0.0
-        run_gaia = 0.0
-        run_scalar = 0.0
+        running = run_img = run_desi = run_gaia = run_scalar = 0.0
 
         for step, batch in enumerate(dl):
             for k, v in batch.items():
                 if torch.is_tensor(v):
                     batch[k] = v.to(device, non_blocking=True)
-
-            optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", enabled=USE_AMP):
                 loss, metrics = training_loss(
@@ -811,16 +809,21 @@ def main():
                     l_scalar=L_SCALAR,
                     weights=LOSS_WEIGHTS,
                 )
+                loss_scaled = loss / GRAD_ACCUM_STEPS
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            scaler.scale(loss_scaled).backward()
 
-            running += metrics["loss"]
-            run_img += metrics["loss_image"]
-            run_desi += metrics["loss_desi"]
-            run_gaia += metrics["loss_gaia"]
-            run_scalar += metrics["loss_scalar"]
+            # logging should use unscaled loss
+            running += float(metrics["loss"])
+            run_img += float(metrics["loss_image"])
+            run_desi += float(metrics["loss_desi"])
+            run_gaia += float(metrics["loss_gaia"])
+            run_scalar += float(metrics["loss_scalar"])
+
+            if (step + 1) % GRAD_ACCUM_STEPS == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
             if step % 20 == 0:
                 print(
@@ -835,6 +838,12 @@ def main():
                     f"{metrics['n_mask_gaia']}/{metrics['n_mask_scalar']} "
                     f"| full_rows desi/img={metrics['n_full_desi_rows']}/{metrics['n_full_img_rows']}"
                 )
+
+        # IMPORTANT: flush leftover grads if steps % accum != 0
+        if (step + 1) % GRAD_ACCUM_STEPS != 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
 
         denom = (step + 1)
         epoch_avg_loss = running / denom
